@@ -122,12 +122,15 @@ async function getPdfjsLib(): Promise<typeof import('pdfjs-dist')> {
   let lib: typeof import('pdfjs-dist');
   try {
     lib = await import('pdfjs-dist');
-  } catch {
+    console.log('[Scholar:PDF] pdfjs-dist loaded, version:', (lib as any).version);
+  } catch (importErr) {
+    console.error('[Scholar:PDF] CATCH getPdfjsLib — dynamic import failed:', importErr);
     throw new PdfExtractionError('load-failed');
   }
 
   // Fix #1: locally bundled worker — no CDN fetch on every upload.
   lib.GlobalWorkerOptions.workerSrc = '/assets/pdf.worker.min.mjs';
+  console.log('[Scholar:PDF] workerSrc set to:', lib.GlobalWorkerOptions.workerSrc);
 
   pdfjsLibCache = lib;
   return lib;
@@ -147,16 +150,26 @@ async function getPdfjsLib(): Promise<typeof import('pdfjs-dist')> {
  *  - Text quality check: detects scanned/image-only PDFs that silently return empty strings
  */
 async function extractPDF(file: File): Promise<PdfExtractionResult> {
+  console.log('[Scholar:PDF] extractPDF START — file:', file.name, 'size:', file.size);
+
   const pdfjsLib = await getPdfjsLib(); // throws PdfExtractionError('load-failed') on failure
 
   const arrayBuffer = await file.arrayBuffer();
+  console.log('[Scholar:PDF] arrayBuffer loaded, byteLength:', arrayBuffer.byteLength);
 
   // Open the PDF document — this is where encrypted / corrupt / XFA errors surface.
   let pdf: Awaited<ReturnType<typeof pdfjsLib.getDocument>['promise']>;
   try {
     pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    console.log('[Scholar:PDF] getDocument resolved, numPages:', pdf.numPages);
   } catch (err) {
+    console.error('[Scholar:PDF] CATCH getDocument —');
+    console.error('  raw error object:', err);
+    console.error('  constructor.name:', (err as any)?.constructor?.name);
+    console.error('  message:', (err as any)?.message);
+    console.error('  stack:', (err as any)?.stack);
     const code = classifyPdfJsError(err);
+    console.error('  classified code:', code);
     throw new PdfExtractionError(code, err instanceof Error ? err.message : undefined);
   }
 
@@ -190,8 +203,11 @@ async function extractPDF(file: File): Promise<PdfExtractionResult> {
     }
   }
 
+  console.log('[Scholar:PDF] allSettled done — succeeded:', succeeded.length, 'failed:', failedPageNums.length, 'failedPages:', failedPageNums);
+
   // Hard failure — not a single page could be read.
   if (succeeded.length === 0) {
+    console.error('[Scholar:PDF] THROW corrupt — all pages failed');
     throw new PdfExtractionError('corrupt', `All ${totalPages} pages failed to render`);
   }
 
@@ -209,8 +225,10 @@ async function extractPDF(file: File): Promise<PdfExtractionResult> {
   if (failedPageNums.length === 0) {
     const totalChars = fullText.replace(/\[Page \d+\]/g, '').trim().length;
     const avgCharsPerPage = totalChars / totalPages;
+    console.log('[Scholar:PDF] text quality check — totalChars:', totalChars, 'avgCharsPerPage:', avgCharsPerPage.toFixed(1), 'threshold:', MIN_CHARS_PER_PAGE);
 
     if (avgCharsPerPage < MIN_CHARS_PER_PAGE) {
+      console.error('[Scholar:PDF] THROW no-text — scanned/image-only PDF detected');
       throw new PdfExtractionError('no-text');
     }
   }
@@ -221,6 +239,7 @@ async function extractPDF(file: File): Promise<PdfExtractionResult> {
       ? `${failedPageNums.length} page${failedPageNums.length > 1 ? 's' : ''} could not be read and were skipped (page${failedPageNums.length > 1 ? 's' : ''} ${failedPageNums.join(', ')})`
       : undefined;
 
+  console.log('[Scholar:PDF] extractPDF SUCCESS — pagesExtracted:', pagesExtracted, '/', totalPages, 'warning:', warning ?? 'none', 'textLength:', fullText.length);
   return { text: fullText, totalPages, pagesExtracted, warning };
 }
 
@@ -353,11 +372,13 @@ export interface ExtractionResult {
  */
 export async function extractFileText(file: File): Promise<ExtractionResult> {
   const ext = file.name.split('.').pop()?.toLowerCase() || '';
+  console.log('[Scholar:extractFileText] called — ext:', ext, 'file:', file.name);
 
   switch (ext) {
     case 'pdf': {
       // extractPDF returns a PdfExtractionResult — pass it through directly.
       const result = await extractPDF(file);
+      console.log('[Scholar:extractFileText] PDF result — pagesExtracted:', result.pagesExtracted, 'totalPages:', result.totalPages, 'warning:', result.warning ?? 'none');
       return result;
     }
     case 'docx':

@@ -149,7 +149,10 @@ export const Sidebar: React.FC = () => {
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {documents.map(doc => (
+                  {documents.map(doc => {
+                    // ── INSTRUMENTATION: log every doc state at render time ──
+                    console.log('[Scholar:Sidebar] rendering doc:', doc.name, '| status:', doc.status, '| error:', doc.error ?? 'none', '| extractionWarning:', (doc as any).extractionWarning ?? 'none', '| pagesExtracted:', (doc as any).pagesExtracted ?? 'n/a', '| totalPages:', (doc as any).totalPages ?? 'n/a');
+                    return (
                     <div key={doc.id} className="glass rounded-lg p-2.5 group">
                       <div className="flex items-start gap-2">
                         <span className="text-lg flex-shrink-0">
@@ -202,7 +205,8 @@ export const Sidebar: React.FC = () => {
                         </button>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

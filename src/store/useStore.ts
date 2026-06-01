@@ -151,7 +151,9 @@ export const useStore = create<Store>((set, get) => ({
     set(state => ({ documents: [...state.documents, doc] }));
 
     try {
+      console.log('[Scholar:uploadDocument] calling extractFileText for:', file.name);
       const result = await extractFileText(file);
+      console.log('[Scholar:uploadDocument] extractFileText returned — text length:', result.text.length, 'warning:', result.warning ?? 'none', 'pagesExtracted:', result.pagesExtracted, 'totalPages:', result.totalPages);
       const textChunks = chunkText(result.text, 400, 80);
 
       updateVocabulary(textChunks);
@@ -190,9 +192,22 @@ export const useStore = create<Store>((set, get) => ({
       set({ suggestions });
 
     } catch (err) {
+      // ── INSTRUMENTATION: full error dump ──────────────────────────────────
+      console.error('[Scholar:uploadDocument] CATCH — raw error:', err);
+      console.error('[Scholar:uploadDocument]   typeof err:', typeof err);
+      console.error('[Scholar:uploadDocument]   instanceof Error:', err instanceof Error);
+      console.error('[Scholar:uploadDocument]   constructor.name:', (err as any)?.constructor?.name);
+      console.error('[Scholar:uploadDocument]   .name:', (err as any)?.name);
+      console.error('[Scholar:uploadDocument]   .message:', (err as any)?.message);
+      console.error('[Scholar:uploadDocument]   .code (PdfExtractionError):', (err as any)?.code);
+      console.error('[Scholar:uploadDocument]   .stack:', (err as any)?.stack);
+      // ─────────────────────────────────────────────────────────────────────
+
       // err.message is already user-readable from PdfExtractionError
       // or a generic message from other extractors.
       const errorMsg = err instanceof Error ? err.message : 'Processing failed';
+      console.error('[Scholar:uploadDocument]   errorMsg assigned to state:', errorMsg);
+
       set(state => ({
         documents: state.documents.map(d =>
           d.id === docId ? { ...d, status: 'error', error: errorMsg } : d
