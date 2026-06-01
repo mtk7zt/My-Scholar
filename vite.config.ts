@@ -1,27 +1,44 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import { viteStaticCopy } from 'vite-plugin-static-copy'
+import { fileURLToPath } from 'url'
+import { resolve, dirname } from 'path'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig({
   plugins: [
     react(),
-    // Copy the pdf.js worker from node_modules into /dist at build time.
-    // This eliminates the CDN fetch on every upload (Fix #1).
-    viteStaticCopy({
-      targets: [
-        {
-          src: 'node_modules/pdfjs-dist/build/pdf.worker.min.mjs',
-          dest: 'assets',
-        },
-      ],
-    }),
   ],
-  optimizeDeps: {
-    include: ['pdfjs-dist', 'mammoth', 'xlsx', 'jszip'],
+  resolve: {
+    alias: [
+      // Force zustand to use its CJS build — avoids Rollup ESM parse issues
+      {
+        find: /^zustand$/,
+        replacement: resolve(__dirname, 'node_modules/zustand/index.js'),
+      },
+      {
+        find: /^zustand\/(.+)$/,
+        replacement: resolve(__dirname, 'node_modules/zustand/$1.js'),
+      },
+      // Force xlsx to use its CJS build
+      {
+        find: /^xlsx$/,
+        replacement: resolve(__dirname, 'node_modules/xlsx/xlsx.js'),
+      },
+    ],
   },
+  optimizeDeps: {
+    include: ['mammoth', 'jszip'],
+    exclude: ['pdfjs-dist'],
+  },
+  assetsInclude: ['**/*.mjs'],
   build: {
     outDir: 'dist',
     sourcemap: false,
+    commonjsOptions: {
+      transformMixedEsModules: true,
+      requireReturnsDefault: 'preferred',
+    },
     rollupOptions: {
       output: {
         manualChunks(id) {

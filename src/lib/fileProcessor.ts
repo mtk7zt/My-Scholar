@@ -15,6 +15,8 @@
 
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
+// Vite resolves this at build time to the correct hashed asset URL (e.g. /assets/pdf.worker-abc123.mjs)
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
 // ---------------------------------------------------------------------------
 // Typed PDF error codes
@@ -128,8 +130,9 @@ async function getPdfjsLib(): Promise<typeof import('pdfjs-dist')> {
     throw new PdfExtractionError('load-failed');
   }
 
-  // Fix #1: locally bundled worker — no CDN fetch on every upload.
-  lib.GlobalWorkerOptions.workerSrc = '/assets/pdf.worker.min.mjs';
+  // Fix #1: Vite resolves pdfWorkerUrl to the correct hashed asset path at build time.
+  // This guarantees the worker is served locally — no CDN, no hardcoded path.
+  lib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   console.log('[Scholar:PDF] workerSrc set to:', lib.GlobalWorkerOptions.workerSrc);
 
   pdfjsLibCache = lib;
