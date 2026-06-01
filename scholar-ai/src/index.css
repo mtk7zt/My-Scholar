@@ -1,0 +1,127 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  background: #0f0f1a;
+  color: #e2e8f0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  height: 100vh;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #1a1a2e;
+}
+::-webkit-scrollbar-thumb {
+  background: #4338ca;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #6366f1;
+}
+
+/* Prose overrides for dark mode */
+.prose {
+  color: #e2e8f0 !important;
+}
+.prose h1, .prose h2, .prose h3, .prose h4 {
+  color: #f1f5f9 !important;
+}
+.prose strong {
+  color: #f1f5f9 !important;
+}
+.prose blockquote {
+  border-left-color: #6366f1 !important;
+  color: #94a3b8 !important;
+}
+.prose ul > li::marker {
+  color: #6366f1 !important;
+}
+.prose ol > li::marker {
+  color: #6366f1 !important;
+}
+.prose hr {
+  border-color: #334155 !important;
+}
+.prose table {
+  color: #e2e8f0 !important;
+}
+.prose thead {
+  border-bottom-color: #475569 !important;
+}
+.prose tbody tr {
+  border-bottom-color: #334155 !important;
+}
+
+/* Streaming cursor */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.streaming-cursor::after {
+  content: '▋';
+  animation: blink 1s infinite;
+  color: #6366f1;
+}
+
+/* Gradient text */
+.gradient-text {
+  background: linear-gradient(135deg, #6366f1, #a855f7, #ec4899);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Glass effect */
+.glass {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Glow effect */
+.glow {
+  box-shadow: 0 0 20px rgba(99, 102, 241, 0.3);
+}
+
+/* File drop zone */
+.drop-zone-active {
+  border-color: #6366f1 !important;
+  background: rgba(99, 102, 241, 0.1) !important;
+}
+
+/* Smooth transitions */
+.transition-all {
+  transition: all 0.2s ease;
+}
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+  body {
+    overflow: auto;
+  }
+  #root {
+    height: auto;
+    min-height: 100vh;
+  }
+}
