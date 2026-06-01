@@ -16,51 +16,212 @@
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 
-// Fix #2: Cache the pdfjs-dist import at module scope so it is only
-// loaded and initialised once per browser session, not on every upload.
+// ---------------------------------------------------------------------------
+// Typed PDF error codes
+// ---------------------------------------------------------------------------
+
+/**
+ * Discriminated error codes for PDF extraction failures.
+ * Each code maps to a specific, user-readable message in getPdfErrorMessage().
+ */
+export type PdfErrorCode =
+  | 'encrypted'       // Password-protected PDF — pdf.js throws PasswordException
+  | 'xfa-unsupported' // XFA/LiveCycle form — pdf.js explicitly does not support these
+  | 'corrupt'         // Malformed or invalid PDF — pdf.js throws InvalidPDFException
+  | 'no-text'         // PDF opened fine but every page has an empty text layer (scanned/image-only)
+  | 'load-failed';    // Worker failed to initialise or dynamic import failed
+
+export class PdfExtractionError extends Error {
+  readonly code: PdfErrorCode;
+  constructor(code: PdfErrorCode, detail?: string) {
+    super(getPdfErrorMessage(code, detail));
+    this.name = 'PdfExtractionError';
+    this.code = code;
+  }
+}
+
+/** Returns the user-facing message for each error code. */
+function getPdfErrorMessage(code: PdfErrorCode, detail?: string): string {
+  switch (code) {
+    case 'encrypted':
+      return 'Password-protected PDF — remove the password and re-upload';
+    case 'xfa-unsupported':
+      return 'XFA form PDF — export as a standard PDF and re-upload';
+    case 'corrupt':
+      return `Corrupt or invalid PDF${detail ? ` (${detail})` : ''} — try re-saving the file`;
+    case 'no-text':
+      return 'Scanned PDF — no text layer detected. Only image-based content found';
+    case 'load-failed':
+      return 'PDF reader failed to load — refresh the page and try again';
+  }
+}
+
+/**
+ * Maps pdf.js internal error class names and messages to typed PdfErrorCodes.
+ * pdf.js does not export its error classes in a way that allows instanceof
+ * checks after bundling, so we match on the constructor name and message text.
+ */
+function classifyPdfJsError(err: unknown): PdfErrorCode {
+  if (err instanceof Error) {
+    const name = err.constructor?.name ?? '';
+    const msg  = err.message ?? '';
+
+    if (name === 'PasswordException' || msg.toLowerCase().includes('password')) {
+      return 'encrypted';
+    }
+    if (msg.toUpperCase().includes('XFA')) {
+      return 'xfa-unsupported';
+    }
+    if (
+      name === 'InvalidPDFException' ||
+      name === 'MissingPDFException' ||
+      msg.includes('Invalid PDF') ||
+      msg.includes('Missing PDF')
+    ) {
+      return 'corrupt';
+    }
+  }
+  return 'corrupt'; // safe fallback for unknown pdf.js errors
+}
+
+// ---------------------------------------------------------------------------
+// Extraction result type
+// ---------------------------------------------------------------------------
+
+/**
+ * Returned by extractPDF (and surfaced through extractFileText for PDFs).
+ * A warning without an error means partial success — some pages were readable.
+ */
+export interface PdfExtractionResult {
+  text: string;
+  totalPages: number;
+  pagesExtracted: number;
+  // Present when extraction succeeded but with caveats (partial pages, low text)
+  warning?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Minimum text quality threshold
+// ---------------------------------------------------------------------------
+
+/**
+ * Average characters per page below which we consider the PDF to have
+ * no meaningful text layer (i.e. it is likely a scanned/image-only PDF).
+ */
+const MIN_CHARS_PER_PAGE = 30;
+
+// ---------------------------------------------------------------------------
+// pdf.js module cache (Fix #2 — load once per session)
+// ---------------------------------------------------------------------------
+
 let pdfjsLibCache: typeof import('pdfjs-dist') | null = null;
 
 async function getPdfjsLib(): Promise<typeof import('pdfjs-dist')> {
   if (pdfjsLibCache) return pdfjsLibCache;
 
-  const lib = await import('pdfjs-dist');
+  let lib: typeof import('pdfjs-dist');
+  try {
+    lib = await import('pdfjs-dist');
+  } catch {
+    throw new PdfExtractionError('load-failed');
+  }
 
-  // Fix #1: Point the worker at the locally bundled copy (served from /assets/)
-  // instead of fetching it from an external CDN on every upload.
+  // Fix #1: locally bundled worker — no CDN fetch on every upload.
   lib.GlobalWorkerOptions.workerSrc = '/assets/pdf.worker.min.mjs';
 
   pdfjsLibCache = lib;
   return lib;
 }
 
-/** Extracts all text from a PDF file with parallel page parsing. */
-async function extractPDF(file: File): Promise<string> {
+// ---------------------------------------------------------------------------
+// Core PDF extractor
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts text from a PDF using pdf.js.
+ *
+ * Reliability improvements over the previous implementation:
+ *  - Typed errors: encrypted / XFA / corrupt / no-text / load-failed
+ *  - Promise.allSettled: one bad page no longer kills the entire document
+ *  - Partial extraction: returns whatever pages succeeded with a warning
+ *  - Text quality check: detects scanned/image-only PDFs that silently return empty strings
+ */
+async function extractPDF(file: File): Promise<PdfExtractionResult> {
+  const pdfjsLib = await getPdfjsLib(); // throws PdfExtractionError('load-failed') on failure
+
+  const arrayBuffer = await file.arrayBuffer();
+
+  // Open the PDF document — this is where encrypted / corrupt / XFA errors surface.
+  let pdf: Awaited<ReturnType<typeof pdfjsLib.getDocument>['promise']>;
   try {
-    // Fix #2: reuse the cached import — no repeated dynamic import cost.
-    const pdfjsLib = await getPdfjsLib();
-
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-
-    // Fix #3: fetch all pages in parallel instead of one-by-one.
-    // Each page.getTextContent() is independent, so Promise.all is safe.
-    // Results are collected into a pre-sized array to preserve page order.
-    const pageNumbers = Array.from({ length: pdf.numPages }, (_, i) => i + 1);
-
-    const pageTexts = await Promise.all(
-      pageNumbers.map(async (pageNum) => {
-        const page = await pdf.getPage(pageNum);
-        const textContent = await page.getTextContent();
-        const pageText = textContent.items.map((item: any) => item.str).join(' ');
-        return `\n[Page ${pageNum}]\n${pageText}`;
-      })
-    );
-
-    return pageTexts.join('');
+    pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   } catch (err) {
-    console.error('PDF extraction error:', err);
-    throw new Error('Failed to extract PDF text');
+    const code = classifyPdfJsError(err);
+    throw new PdfExtractionError(code, err instanceof Error ? err.message : undefined);
   }
+
+  const totalPages = pdf.numPages;
+  const pageNumbers = Array.from({ length: totalPages }, (_, i) => i + 1);
+
+  // Promise.allSettled — a single failing page no longer aborts the whole document.
+  const results = await Promise.allSettled(
+    pageNumbers.map(async (pageNum) => {
+      const page = await pdf.getPage(pageNum);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items
+        .map((item: any) => item.str)
+        .join(' ')
+        .trim();
+      return { pageNum, pageText };
+    })
+  );
+
+  // Partition into succeeded and failed pages.
+  const succeeded: { pageNum: number; pageText: string }[] = [];
+  const failedPageNums: number[] = [];
+
+  for (const result of results) {
+    if (result.status === 'fulfilled') {
+      succeeded.push(result.value);
+    } else {
+      // Extract page number from the index position (results array is ordered).
+      const idx = results.indexOf(result);
+      failedPageNums.push(pageNumbers[idx]);
+    }
+  }
+
+  // Hard failure — not a single page could be read.
+  if (succeeded.length === 0) {
+    throw new PdfExtractionError('corrupt', `All ${totalPages} pages failed to render`);
+  }
+
+  // Assemble text in page order.
+  const fullText = succeeded
+    .sort((a, b) => a.pageNum - b.pageNum)
+    .map(({ pageNum, pageText }) => `\n[Page ${pageNum}]\n${pageText}`)
+    .join('');
+
+  const pagesExtracted = succeeded.length;
+
+  // Text quality check — detect scanned / image-only PDFs.
+  // We only run this when ALL pages rendered (no hard failures), because
+  // a partial extraction with some empty pages is a different problem.
+  if (failedPageNums.length === 0) {
+    const totalChars = fullText.replace(/\[Page \d+\]/g, '').trim().length;
+    const avgCharsPerPage = totalChars / totalPages;
+
+    if (avgCharsPerPage < MIN_CHARS_PER_PAGE) {
+      throw new PdfExtractionError('no-text');
+    }
+  }
+
+  // Build the result — attach a warning if some pages were skipped.
+  const warning =
+    failedPageNums.length > 0
+      ? `${failedPageNums.length} page${failedPageNums.length > 1 ? 's' : ''} could not be read and were skipped (page${failedPageNums.length > 1 ? 's' : ''} ${failedPageNums.join(', ')})`
+      : undefined;
+
+  return { text: fullText, totalPages, pagesExtracted, warning };
 }
 
 /** Extracts plain text from a DOCX file using mammoth. */
@@ -175,28 +336,43 @@ async function extractText(file: File): Promise<string> {
 }
 
 /**
- * Routes a file to the correct extractor based on its extension.
- * Returns the full extracted text content as a string.
+ * Unified extraction result returned by extractFileText.
+ * For non-PDF files, warning/pagesExtracted/totalPages are always undefined.
  */
-export async function extractFileText(file: File): Promise<string> {
+export interface ExtractionResult {
+  text: string;
+  warning?: string;
+  pagesExtracted?: number;
+  totalPages?: number;
+}
+
+/**
+ * Routes a file to the correct extractor based on its extension.
+ * Returns an ExtractionResult so callers can surface warnings and page stats.
+ * Throws PdfExtractionError (typed) for PDF-specific failures.
+ */
+export async function extractFileText(file: File): Promise<ExtractionResult> {
   const ext = file.name.split('.').pop()?.toLowerCase() || '';
 
   switch (ext) {
-    case 'pdf':
-      return extractPDF(file);
+    case 'pdf': {
+      // extractPDF returns a PdfExtractionResult — pass it through directly.
+      const result = await extractPDF(file);
+      return result;
+    }
     case 'docx':
     case 'doc':
-      return extractDOCX(file);
+      return { text: await extractDOCX(file) };
     case 'xlsx':
     case 'xls':
-      return extractXLSX(file);
+      return { text: await extractXLSX(file) };
     case 'pptx':
     case 'ppt':
-      return extractPPTX(file);
+      return { text: await extractPPTX(file) };
     case 'zip':
-      return extractZIP(file);
+      return { text: await extractZIP(file) };
     default:
-      return extractText(file);
+      return { text: await extractText(file) };
   }
 }
 

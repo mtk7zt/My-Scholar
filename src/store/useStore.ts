@@ -151,8 +151,8 @@ export const useStore = create<Store>((set, get) => ({
     set(state => ({ documents: [...state.documents, doc] }));
 
     try {
-      const text = await extractFileText(file);
-      const textChunks = chunkText(text, 400, 80);
+      const result = await extractFileText(file);
+      const textChunks = chunkText(result.text, 400, 80);
 
       updateVocabulary(textChunks);
 
@@ -167,11 +167,20 @@ export const useStore = create<Store>((set, get) => ({
 
       set(state => ({
         chunks: [...state.chunks, ...documentChunks],
-        documents: state.documents.map(d =>
-          d.id === docId
-            ? { ...d, status: 'ready', chunkCount: documentChunks.length }
-            : d
-        ),
+        documents: state.documents.map(d => {
+          if (d.id !== docId) return d;
+          // Partial extraction: some pages succeeded, some failed.
+          // Mark as 'partial' so the UI shows a warning instead of an error.
+          const status = result.warning ? 'partial' : 'ready';
+          return {
+            ...d,
+            status,
+            chunkCount: documentChunks.length,
+            extractionWarning: result.warning,
+            pagesExtracted: result.pagesExtracted,
+            totalPages: result.totalPages,
+          };
+        }),
       }));
 
       // Generate smart suggestions based on file name and type
@@ -181,6 +190,8 @@ export const useStore = create<Store>((set, get) => ({
       set({ suggestions });
 
     } catch (err) {
+      // err.message is already user-readable from PdfExtractionError
+      // or a generic message from other extractors.
       const errorMsg = err instanceof Error ? err.message : 'Processing failed';
       set(state => ({
         documents: state.documents.map(d =>

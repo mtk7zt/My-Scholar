@@ -169,10 +169,29 @@ export const Sidebar: React.FC = () => {
                             </div>
                           )}
                           {doc.status === 'ready' && (
-                            <span className="text-xs text-emerald-400">✓ {doc.chunkCount} chunks ready</span>
+                            <span className="text-xs text-emerald-400">
+                              ✓ {doc.chunkCount} chunks ready
+                              {doc.totalPages && (
+                                <span className="text-slate-500"> · {doc.totalPages}p</span>
+                              )}
+                            </span>
+                          )}
+                          {doc.status === 'partial' && (
+                            <div className="mt-1 space-y-0.5">
+                              <span className="text-xs text-amber-400">
+                                ⚠ {doc.pagesExtracted}/{doc.totalPages} pages · {doc.chunkCount} chunks
+                              </span>
+                              {doc.extractionWarning && (
+                                <p className="text-xs text-amber-500/80 leading-tight">
+                                  {doc.extractionWarning}
+                                </p>
+                              )}
+                            </div>
                           )}
                           {doc.status === 'error' && (
-                            <span className="text-xs text-red-400">✗ {doc.error}</span>
+                            <p className="text-xs text-red-400 leading-tight mt-0.5">
+                              ✗ {doc.error}
+                            </p>
                           )}
                         </div>
                         <button

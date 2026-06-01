@@ -32,8 +32,14 @@ export interface UploadedDocument {
   size: number;
   uploadedAt: Date;
   chunkCount: number;
-  status: 'processing' | 'ready' | 'error';
+  // 'partial' means some pages extracted successfully but others failed or had no text
+  status: 'processing' | 'ready' | 'partial' | 'error';
   error?: string;
+  // Human-readable warning shown for partial/scanned results (not a hard failure)
+  extractionWarning?: string;
+  // Page-level extraction stats, populated for PDF files
+  pagesExtracted?: number;
+  totalPages?: number;
 }
 
 export interface RetrievedChunk {
