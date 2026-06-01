@@ -4,7 +4,7 @@
  * Global application state managed with Zustand.
  * All document data, chat messages, and settings live here in memory —
  * nothing is persisted to a database or server. The only exception is
- * the Gemini API key, which is saved to localStorage for convenience.
+ * the Gemini API key and profile, which are saved to localStorage.
  *
  * State is fully cleared when the user clicks "New Chat" or closes the tab.
  */
@@ -20,6 +20,11 @@ import {
 } from '../lib/embeddings';
 import { extractFileText } from '../lib/fileProcessor';
 import { v4 as uuidv4 } from 'uuid';
+
+export interface UserProfile {
+  name: string;
+  avatar: string; // emoji avatar
+}
 
 interface Store {
   // Chat
@@ -44,6 +49,10 @@ interface Store {
   setRubric: (rubric: Rubric | null) => void;
   toggleRubric: () => void;
 
+  // Profile
+  profile: UserProfile;
+  setProfile: (p: Partial<UserProfile>) => void;
+
   // API key (persisted to localStorage only)
   apiKey: string;
   setApiKey: (key: string) => void;
@@ -53,10 +62,14 @@ interface Store {
   setIsLoading: (v: boolean) => void;
   sidebarOpen: boolean;
   setSidebarOpen: (v: boolean) => void;
-  rubricPanelOpen: boolean;
-  setRubricPanelOpen: (v: boolean) => void;
+  settingsOpen: boolean;
+  setSettingsOpen: (v: boolean) => void;
   activePanel: 'files' | 'settings' | 'rubric';
   setActivePanel: (p: 'files' | 'settings' | 'rubric') => void;
+
+  // Smart suggestions after file upload
+  suggestions: string[];
+  setSuggestions: (s: string[]) => void;
 
   // Session reset
   newChat: () => void;
@@ -83,16 +96,23 @@ const DEFAULT_SETTINGS: AppSettings = {
   streamingEnabled: true,
 };
 
+const savedProfile = localStorage.getItem('scholar_profile');
+const DEFAULT_PROFILE: UserProfile = savedProfile
+  ? JSON.parse(savedProfile)
+  : { name: 'Student', avatar: '🎓' };
+
 export const useStore = create<Store>((set, get) => ({
   messages: [],
   documents: [],
   chunks: [],
   settings: DEFAULT_SETTINGS,
   apiKey: localStorage.getItem('scholar_api_key') || '',
+  profile: DEFAULT_PROFILE,
   isLoading: false,
   sidebarOpen: true,
-  rubricPanelOpen: false,
+  settingsOpen: false,
   activePanel: 'files',
+  suggestions: [],
 
   addMessage: (msg) => {
     const id = uuidv4();
@@ -134,7 +154,6 @@ export const useStore = create<Store>((set, get) => ({
       const text = await extractFileText(file);
       const textChunks = chunkText(text, 400, 80);
 
-      // Update the shared vocabulary before generating embeddings
       updateVocabulary(textChunks);
 
       const documentChunks: DocumentChunk[] = textChunks.map((content, idx) => ({
@@ -154,6 +173,13 @@ export const useStore = create<Store>((set, get) => ({
             : d
         ),
       }));
+
+      // Generate smart suggestions based on file name and type
+      const ext = file.name.split('.').pop()?.toLowerCase() || '';
+      const baseName = file.name.replace(/\.[^/.]+$/, '');
+      const suggestions = generateSuggestions(baseName, ext);
+      set({ suggestions });
+
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Processing failed';
       set(state => ({
@@ -173,7 +199,7 @@ export const useStore = create<Store>((set, get) => ({
 
   clearDocuments: () => {
     resetEmbeddingState();
-    set({ documents: [], chunks: [] });
+    set({ documents: [], chunks: [], suggestions: [] });
   },
 
   /**
@@ -195,7 +221,7 @@ export const useStore = create<Store>((set, get) => ({
     return scored
       .sort((a, b) => b.score - a.score)
       .slice(0, topK)
-      .filter(r => r.score > 0.01); // Discard near-zero matches
+      .filter(r => r.score > 0.01);
   },
 
   updateSettings: (updates) => {
@@ -209,6 +235,14 @@ export const useStore = create<Store>((set, get) => ({
     settings: { ...state.settings, rubricEnabled: !state.settings.rubricEnabled },
   })),
 
+  setProfile: (p) => {
+    set(state => {
+      const updated = { ...state.profile, ...p };
+      localStorage.setItem('scholar_profile', JSON.stringify(updated));
+      return { profile: updated };
+    });
+  },
+
   setApiKey: (key) => {
     localStorage.setItem('scholar_api_key', key);
     set({ apiKey: key });
@@ -216,12 +250,68 @@ export const useStore = create<Store>((set, get) => ({
 
   setIsLoading: (v) => set({ isLoading: v }),
   setSidebarOpen: (v) => set({ sidebarOpen: v }),
-  setRubricPanelOpen: (v) => set({ rubricPanelOpen: v }),
+  setSettingsOpen: (v) => set({ settingsOpen: v }),
   setActivePanel: (p) => set({ activePanel: p }),
+  setSuggestions: (s) => set({ suggestions: s }),
 
   /** Resets the entire session — clears messages, documents, and embeddings. */
   newChat: () => {
     resetEmbeddingState();
-    set({ messages: [], documents: [], chunks: [], isLoading: false });
+    set({ messages: [], documents: [], chunks: [], isLoading: false, suggestions: [] });
   },
 }));
+
+/** Generates context-aware question suggestions based on the uploaded file. */
+function generateSuggestions(fileName: string, ext: string): string[] {
+  const docSuggestions: Record<string, string[]> = {
+    pdf: [
+      `Summarize the key points of "${fileName}"`,
+      `What are the main conclusions in this document?`,
+      `List the most important facts from this file`,
+      `Create study notes from this document`,
+    ],
+    docx: [
+      `Summarize "${fileName}"`,
+      `What is the main argument of this document?`,
+      `Identify key themes and topics`,
+      `Suggest improvements to this writing`,
+    ],
+    xlsx: [
+      `Analyze the data in "${fileName}"`,
+      `What trends can you identify in this spreadsheet?`,
+      `Summarize the key statistics`,
+      `What insights can be drawn from this data?`,
+    ],
+    pptx: [
+      `Summarize the presentation "${fileName}"`,
+      `What are the key takeaways from these slides?`,
+      `Create speaker notes for this presentation`,
+      `What questions might an audience ask?`,
+    ],
+    py: [
+      `Explain what this code does`,
+      `Review "${fileName}" for bugs or improvements`,
+      `Write unit tests for this code`,
+      `Optimize this code for performance`,
+    ],
+    js: [
+      `Explain what this JavaScript code does`,
+      `Review "${fileName}" for bugs`,
+      `How can this code be improved?`,
+      `Write tests for this code`,
+    ],
+    ts: [
+      `Explain this TypeScript code`,
+      `Review "${fileName}" for type safety issues`,
+      `Suggest refactoring improvements`,
+      `Write unit tests for this module`,
+    ],
+  };
+
+  return docSuggestions[ext] || [
+    `Summarize "${fileName}"`,
+    `What are the key points in this file?`,
+    `Explain the main concepts`,
+    `Create a structured outline of this content`,
+  ];
+}

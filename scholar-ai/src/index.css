@@ -16,6 +16,15 @@ body {
   padding: 0;
   overflow: hidden;
   height: 100vh;
+  /* Prevent iOS bounce scroll */
+  overscroll-behavior: none;
+}
+
+/* Fix iOS Safari 100vh issue */
+@supports (-webkit-touch-callout: none) {
+  body, #root {
+    height: -webkit-fill-available;
+  }
 }
 
 #root {
@@ -115,13 +124,37 @@ body {
   transition: all 0.2s ease;
 }
 
-/* Mobile responsive */
-@media (max-width: 768px) {
+/* Slide-in animation for settings modal */
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+.animate-slide-in {
+  animation: slideIn 0.25s ease-out forwards;
+}
+
+/* Mobile: ensure chat input stays above keyboard */
+@media (max-width: 640px) {
   body {
-    overflow: auto;
+    overflow: hidden;
+    position: fixed;
+    width: 100%;
+    height: 100%;
   }
   #root {
-    height: auto;
-    min-height: 100vh;
+    height: 100%;
+    overflow: hidden;
   }
+}
+
+/* Prevent text selection on buttons for better mobile UX */
+button {
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+/* Make textarea comfortable on mobile */
+textarea {
+  -webkit-appearance: none;
+  appearance: none;
 }

@@ -1,13 +1,12 @@
 /**
  * ChatInput.tsx
  *
- * The message composition bar at the bottom of the chat.
- * Handles text input, file uploads (click or drag-and-drop), and
- * orchestrates the full RAG → Gemini streaming pipeline on send:
- *
- *  1. Search uploaded documents for relevant chunks
- *  2. Build conversation history for the Gemini API
- *  3. Stream the response token-by-token into the message store
+ * Mobile-first message composition bar.
+ * - Auto-resizing textarea (up to 5 lines)
+ * - File upload via button or drag-and-drop
+ * - Enter to send, Shift+Enter for new line (desktop)
+ * - On mobile: send button is always visible and tappable
+ * - Orchestrates the full RAG → Gemini streaming pipeline on send
  */
 
 import React, { useState, useRef, useCallback } from 'react';
@@ -30,7 +29,7 @@ export const ChatInput: React.FC = () => {
     const ta = textareaRef.current;
     if (ta) {
       ta.style.height = 'auto';
-      ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+      ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
     }
   };
 
@@ -42,28 +41,25 @@ export const ChatInput: React.FC = () => {
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setIsLoading(true);
 
-    // Add user message
     addMessage({ role: 'user', content: text });
 
-    // Search documents for relevant context
+    // Search documents for relevant context (RAG)
     const retrieved = searchDocuments(text, 5);
     const retrievedContext = retrieved.length > 0
       ? retrieved.map(r => `[From: ${r.chunk.documentName}]\n${r.chunk.content}`).join('\n\n---\n\n')
       : '';
 
-    // Build conversation history for Gemini
+    // Build conversation history (last 20 messages)
     const history: GeminiMessage[] = messages
       .filter(m => !m.streaming)
-      .slice(-20) // Last 20 messages for context
+      .slice(-20)
       .map(m => ({
         role: m.role === 'user' ? 'user' : 'model',
         parts: [{ text: m.content }],
       }));
 
-    // Add current user message
     history.push({ role: 'user', parts: [{ text }] });
 
-    // Add assistant message placeholder
     const assistantId = addMessage({
       role: 'assistant',
       content: '',
@@ -102,7 +98,9 @@ export const ChatInput: React.FC = () => {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // On mobile (touch devices), always use the send button
+    // On desktop, Enter sends; Shift+Enter adds a new line
+    if (e.key === 'Enter' && !e.shiftKey && window.innerWidth > 640) {
       e.preventDefault();
       handleSend();
     }
@@ -121,45 +119,46 @@ export const ChatInput: React.FC = () => {
     await handleFileUpload(e.dataTransfer.files);
   }, []);
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(true);
-  };
-
+  const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); };
   const handleDragLeave = () => setIsDragging(false);
+
+  const readyDocs = documents.filter(d => d.status === 'ready').length;
 
   return (
     <div
-      className={`border-t border-slate-800 p-4 transition-all ${isDragging ? 'drop-zone-active' : ''}`}
+      className={`border-t border-slate-800 px-3 sm:px-4 pt-3 pb-4 sm:pb-4 transition-all relative ${isDragging ? 'drop-zone-active' : ''}`}
       onDrop={handleDrop}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
     >
+      {/* Drag overlay */}
       {isDragging && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-scholar-900/80 backdrop-blur-sm rounded-xl border-2 border-dashed border-scholar-500">
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-scholar-900/80 backdrop-blur-sm border-2 border-dashed border-scholar-500 rounded-xl m-2">
           <div className="text-center">
             <div className="text-4xl mb-2">📂</div>
-            <p className="text-scholar-300 font-medium">Drop files to upload</p>
+            <p className="text-scholar-300 font-medium text-sm">Drop files to upload</p>
           </div>
         </div>
       )}
 
-      {/* Document count indicator */}
-      {documents.length > 0 && (
+      {/* Document indicator */}
+      {readyDocs > 0 && (
         <div className="flex items-center gap-2 mb-2 px-1">
           <span className="text-xs text-scholar-400">
-            📎 {documents.filter(d => d.status === 'ready').length} document{documents.filter(d => d.status === 'ready').length !== 1 ? 's' : ''} loaded
+            📎 {readyDocs} doc{readyDocs !== 1 ? 's' : ''} loaded
           </span>
           <span className="text-xs text-slate-600">· Searching automatically</span>
         </div>
       )}
 
+      {/* Input row */}
       <div className="flex items-end gap-2">
-        {/* File upload button */}
+        {/* File upload */}
         <button
           onClick={() => fileInputRef.current?.click()}
           className="flex-shrink-0 w-10 h-10 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 flex items-center justify-center text-slate-400 hover:text-white transition-all"
           title="Upload files"
+          aria-label="Upload files"
         >
           📎
         </button>
@@ -172,8 +171,8 @@ export const ChatInput: React.FC = () => {
           onChange={e => handleFileUpload(e.target.files)}
         />
 
-        {/* Text input */}
-        <div className="flex-1 relative">
+        {/* Textarea */}
+        <div className="flex-1 min-w-0">
           <textarea
             ref={textareaRef}
             value={input}
@@ -181,14 +180,15 @@ export const ChatInput: React.FC = () => {
             onKeyDown={handleKeyDown}
             placeholder={
               !apiKey
-                ? 'Enter your API key to start...'
+                ? 'Tap the profile button to enter your API key...'
                 : isLoading
                 ? 'Scholar AI is thinking...'
-                : 'Ask anything... (Shift+Enter for new line)'
+                : 'Ask anything...'
             }
             disabled={isLoading || !apiKey}
             rows={1}
-            className="w-full bg-slate-800/80 border border-slate-700 rounded-xl px-4 py-3 pr-12 text-white placeholder-slate-500 focus:outline-none focus:border-scholar-500 focus:ring-1 focus:ring-scholar-500 resize-none transition-all text-sm leading-relaxed disabled:opacity-50"
+            className="w-full bg-slate-800/80 border border-slate-700 rounded-xl px-3 sm:px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-scholar-500 focus:ring-1 focus:ring-scholar-500 resize-none transition-all text-sm leading-relaxed disabled:opacity-50"
+            style={{ minHeight: '44px' }}
           />
         </div>
 
@@ -197,6 +197,7 @@ export const ChatInput: React.FC = () => {
           onClick={handleSend}
           disabled={!input.trim() || isLoading || !apiKey}
           className="flex-shrink-0 w-10 h-10 rounded-xl bg-gradient-to-br from-scholar-600 to-purple-600 hover:from-scholar-500 hover:to-purple-500 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center text-white transition-all glow"
+          aria-label="Send message"
         >
           {isLoading ? (
             <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -208,7 +209,7 @@ export const ChatInput: React.FC = () => {
         </button>
       </div>
 
-      <p className="text-xs text-slate-600 text-center mt-2">
+      <p className="text-xs text-slate-700 text-center mt-2 hidden sm:block">
         Scholar AI · Gemini 2.5 Flash · All data stays in your browser
       </p>
     </div>
