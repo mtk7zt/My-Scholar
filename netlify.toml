@@ -4,6 +4,7 @@
   status = 200
 
 [build]
+  base    = "scholar-ai"
   command = "npm run build"
   publish = "dist"
 
