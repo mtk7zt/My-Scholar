@@ -29,6 +29,7 @@ const TONES: { value: Tone; label: string; icon: string }[] = [
 export const Sidebar: React.FC = () => {
   const {
     documents, uploadDocument, removeDocument, clearDocuments,
+    uploadError, clearUploadError,
     settings, setMode, setTone,
     newChat,
     activePanel, setActivePanel,
@@ -142,6 +143,15 @@ export const Sidebar: React.FC = () => {
                 onChange={e => handleFileUpload(e.target.files)}
               />
 
+              {uploadError && (
+                <div role='alert' className='rounded-lg border border-red-800/50 bg-red-900/20 p-2 text-xs text-red-300'>
+                  <div className='flex items-start justify-between gap-2'>
+                    <span>{uploadError}</span>
+                    <button onClick={clearUploadError} aria-label='Dismiss upload error'>×</button>
+                  </div>
+                </div>
+              )}
+
               {documents.length === 0 ? (
                 <div className="text-center py-4">
                   <p className="text-xs text-slate-600">No documents uploaded yet</p>
@@ -149,10 +159,7 @@ export const Sidebar: React.FC = () => {
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {documents.map(doc => {
-                    // ── INSTRUMENTATION: log every doc state at render time ──
-                    console.log('[Scholar:Sidebar] rendering doc:', doc.name, '| status:', doc.status, '| error:', doc.error ?? 'none', '| extractionWarning:', (doc as any).extractionWarning ?? 'none', '| pagesExtracted:', (doc as any).pagesExtracted ?? 'n/a', '| totalPages:', (doc as any).totalPages ?? 'n/a');
-                    return (
+                  {documents.map(doc => (
                     <div key={doc.id} className="glass rounded-lg p-2.5 group">
                       <div className="flex items-start gap-2">
                         <span className="text-lg flex-shrink-0">
@@ -205,8 +212,7 @@ export const Sidebar: React.FC = () => {
                         </button>
                       </div>
                     </div>
-                    );
-                  })}
+                  ))}
                 </div>
               )}
             </div>

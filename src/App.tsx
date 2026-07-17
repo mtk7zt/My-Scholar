@@ -31,7 +31,7 @@ function App() {
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, []);
+  }, [newChat]);
 
   return (
     <div className="h-screen flex flex-col bg-[#0f0f1a] overflow-hidden">

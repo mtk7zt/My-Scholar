@@ -9,10 +9,11 @@
  * - Orchestrates the full RAG → Gemini streaming pipeline on send
  */
 
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef } from 'react';
 import { useStore } from '../store/useStore';
 import { streamGeminiResponse } from '../lib/gemini';
 import type { GeminiMessage } from '../lib/gemini';
+import { ensureDocumentSharingConsent } from '../lib/privacy';
 
 export const ChatInput: React.FC = () => {
   const [input, setInput] = useState('');
@@ -23,6 +24,8 @@ export const ChatInput: React.FC = () => {
   const {
     messages, addMessage, updateMessage, isLoading, setIsLoading,
     settings, apiKey, searchDocuments, uploadDocument, documents,
+    documentSharingConsent, grantDocumentSharingConsent,
+    uploadError, clearUploadError,
   } = useStore();
 
   const adjustHeight = () => {
@@ -37,14 +40,16 @@ export const ChatInput: React.FC = () => {
     const text = input.trim();
     if (!text || isLoading || !apiKey) return;
 
+    // Search documents for relevant context (RAG)
+    const retrieved = searchDocuments(text, 5);
+    if (retrieved.length > 0 && !ensureDocumentSharingConsent(documentSharingConsent, grantDocumentSharingConsent)) return;
+
     setInput('');
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setIsLoading(true);
 
     addMessage({ role: 'user', content: text });
 
-    // Search documents for relevant context (RAG)
-    const retrieved = searchDocuments(text, 5);
     const retrievedContext = retrieved.length > 0
       ? retrieved.map(r => `[From: ${r.chunk.documentName}]\n${r.chunk.content}`).join('\n\n---\n\n')
       : '';
@@ -113,11 +118,11 @@ export const ChatInput: React.FC = () => {
     }
   };
 
-  const handleDrop = useCallback(async (e: React.DragEvent) => {
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
     await handleFileUpload(e.dataTransfer.files);
-  }, []);
+  };
 
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); };
   const handleDragLeave = () => setIsDragging(false);
@@ -142,6 +147,13 @@ export const ChatInput: React.FC = () => {
       )}
 
       {/* Document indicator */}
+      {uploadError && (
+        <div role='alert' className='mb-2 flex items-start justify-between gap-2 rounded-lg border border-red-800/50 bg-red-900/20 px-3 py-2 text-xs text-red-300'>
+          <span>{uploadError}</span>
+          <button onClick={clearUploadError} aria-label='Dismiss upload error'>×</button>
+        </div>
+      )}
+
       {readyDocs > 0 && (
         <div className="flex items-center gap-2 mb-2 px-1">
           <span className="text-xs text-scholar-400">
@@ -210,7 +222,7 @@ export const ChatInput: React.FC = () => {
       </div>
 
       <p className="text-xs text-slate-700 text-center mt-2 hidden sm:block">
-        Scholar AI · Gemini 2.5 Flash · All data stays in your browser
+        Files are parsed locally · Prompts and consented excerpts are sent to Google Gemini
       </p>
     </div>
   );

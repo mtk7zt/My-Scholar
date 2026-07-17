@@ -3,8 +3,8 @@
  *
  * Global application state managed with Zustand.
  * All document data, chat messages, and settings live here in memory —
- * nothing is persisted to a database or server. The only exception is
- * the Gemini API key and profile, which are saved to localStorage.
+ * nothing is persisted to a database or server. The profile is saved to
+ * localStorage; the Gemini API key is session-only unless the user opts in.
  *
  * State is fully cleared when the user clicks "New Chat" or closes the tab.
  */
@@ -18,7 +18,7 @@ import {
   updateVocabulary,
   resetEmbeddingState,
 } from '../lib/embeddings';
-import { extractFileText } from '../lib/fileProcessor';
+import { DOCUMENT_LIMITS, extractFileText } from '../lib/fileProcessor';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface UserProfile {
@@ -40,6 +40,8 @@ interface Store {
   removeDocument: (id: string) => void;
   clearDocuments: () => void;
   searchDocuments: (query: string, topK?: number) => RetrievedChunk[];
+  uploadError: string | null;
+  clearUploadError: () => void;
 
   // Settings
   settings: AppSettings;
@@ -53,9 +55,15 @@ interface Store {
   profile: UserProfile;
   setProfile: (p: Partial<UserProfile>) => void;
 
-  // API key (persisted to localStorage only)
+  // API key (session memory by default; optional localStorage persistence)
   apiKey: string;
-  setApiKey: (key: string) => void;
+  apiKeyRemembered: boolean;
+  setApiKey: (key: string, remember?: boolean) => void;
+  forgetApiKey: () => void;
+
+  // Session-only consent for sending retrieved document excerpts to Gemini
+  documentSharingConsent: boolean;
+  grantDocumentSharingConsent: () => void;
 
   // UI state
   isLoading: boolean;
@@ -97,6 +105,8 @@ const DEFAULT_SETTINGS: AppSettings = {
 };
 
 const savedProfile = localStorage.getItem('scholar_profile');
+// Legacy persisted keys are treated as previously remembered.
+const rememberedApiKey = localStorage.getItem('scholar_api_key') || '';
 const DEFAULT_PROFILE: UserProfile = savedProfile
   ? JSON.parse(savedProfile)
   : { name: 'Student', avatar: '🎓' };
@@ -106,13 +116,16 @@ export const useStore = create<Store>((set, get) => ({
   documents: [],
   chunks: [],
   settings: DEFAULT_SETTINGS,
-  apiKey: localStorage.getItem('scholar_api_key') || '',
+  apiKey: rememberedApiKey,
+  apiKeyRemembered: Boolean(rememberedApiKey),
+  documentSharingConsent: false,
   profile: DEFAULT_PROFILE,
   isLoading: false,
   sidebarOpen: true,
   settingsOpen: false,
   activePanel: 'files',
   suggestions: [],
+  uploadError: null,
 
   addMessage: (msg) => {
     const id = uuidv4();
@@ -137,6 +150,11 @@ export const useStore = create<Store>((set, get) => ({
    *  4. Stores chunks in memory for retrieval during chat
    */
   uploadDocument: async (file: File) => {
+    if (get().documents.length >= DOCUMENT_LIMITS.maxDocumentsPerSession) {
+      set({ uploadError: 'A session can contain up to ' + DOCUMENT_LIMITS.maxDocumentsPerSession + ' documents' });
+      return;
+    }
+    set({ uploadError: null });
     const docId = uuidv4();
     const doc: UploadedDocument = {
       id: docId,
@@ -151,9 +169,7 @@ export const useStore = create<Store>((set, get) => ({
     set(state => ({ documents: [...state.documents, doc] }));
 
     try {
-      console.log('[Scholar:uploadDocument] calling extractFileText for:', file.name);
       const result = await extractFileText(file);
-      console.log('[Scholar:uploadDocument] extractFileText returned — text length:', result.text.length, 'warning:', result.warning ?? 'none', 'pagesExtracted:', result.pagesExtracted, 'totalPages:', result.totalPages);
       const textChunks = chunkText(result.text, 400, 80);
 
       updateVocabulary(textChunks);
@@ -193,20 +209,11 @@ export const useStore = create<Store>((set, get) => ({
 
     } catch (err) {
       // ── INSTRUMENTATION: full error dump ──────────────────────────────────
-      console.error('[Scholar:uploadDocument] CATCH — raw error:', err);
-      console.error('[Scholar:uploadDocument]   typeof err:', typeof err);
-      console.error('[Scholar:uploadDocument]   instanceof Error:', err instanceof Error);
-      console.error('[Scholar:uploadDocument]   constructor.name:', (err as any)?.constructor?.name);
-      console.error('[Scholar:uploadDocument]   .name:', (err as any)?.name);
-      console.error('[Scholar:uploadDocument]   .message:', (err as any)?.message);
-      console.error('[Scholar:uploadDocument]   .code (PdfExtractionError):', (err as any)?.code);
-      console.error('[Scholar:uploadDocument]   .stack:', (err as any)?.stack);
       // ─────────────────────────────────────────────────────────────────────
 
       // err.message is already user-readable from PdfExtractionError
       // or a generic message from other extractors.
       const errorMsg = err instanceof Error ? err.message : 'Processing failed';
-      console.error('[Scholar:uploadDocument]   errorMsg assigned to state:', errorMsg);
 
       set(state => ({
         documents: state.documents.map(d =>
@@ -225,8 +232,10 @@ export const useStore = create<Store>((set, get) => ({
 
   clearDocuments: () => {
     resetEmbeddingState();
-    set({ documents: [], chunks: [], suggestions: [] });
+    set({ documents: [], chunks: [], suggestions: [], uploadError: null });
   },
+
+  clearUploadError: () => set({ uploadError: null }),
 
   /**
    * Searches all stored document chunks for content relevant to the query.
@@ -269,10 +278,18 @@ export const useStore = create<Store>((set, get) => ({
     });
   },
 
-  setApiKey: (key) => {
-    localStorage.setItem('scholar_api_key', key);
-    set({ apiKey: key });
+  setApiKey: (key, remember = false) => {
+    if (remember && key) localStorage.setItem('scholar_api_key', key);
+    else localStorage.removeItem('scholar_api_key');
+    set({ apiKey: key, apiKeyRemembered: remember && Boolean(key) });
   },
+
+  forgetApiKey: () => {
+    localStorage.removeItem('scholar_api_key');
+    set({ apiKey: '', apiKeyRemembered: false });
+  },
+
+  grantDocumentSharingConsent: () => set({ documentSharingConsent: true }),
 
   setIsLoading: (v) => set({ isLoading: v }),
   setSidebarOpen: (v) => set({ sidebarOpen: v }),

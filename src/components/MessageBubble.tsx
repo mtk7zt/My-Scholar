@@ -54,7 +54,8 @@ export const MessageBubble: React.FC<Props> = ({ message }) => {
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={{
-                  code({ node, className, children, ...props }: any) {
+                  code({ node, className, children, ...props }) {
+                    void node;
                     const match = /language-(\w+)/.exec(className || '');
                     const isInline = !match;
                     return isInline ? (
@@ -86,7 +87,6 @@ export const MessageBubble: React.FC<Props> = ({ message }) => {
                             borderRadius: '0 0 0.5rem 0.5rem',
                             fontSize: '0.8rem',
                           }}
-                          {...props}
                         >
                           {String(children).replace(/\n$/, '')}
                         </SyntaxHighlighter>

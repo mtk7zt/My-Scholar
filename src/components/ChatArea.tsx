@@ -14,6 +14,7 @@ import { MessageBubble } from './MessageBubble';
 import { ChatInput } from './ChatInput';
 import { streamGeminiResponse } from '../lib/gemini';
 import type { Mode } from '../types';
+import { ensureDocumentSharingConsent } from '../lib/privacy';
 
 const MODE_STARTERS: Record<Mode | 'general', { icon: string; title: string; prompts: string[] }> = {
   general: {
@@ -72,6 +73,7 @@ export const ChatArea: React.FC = () => {
   const {
     messages, isLoading, settings, addMessage, updateMessage,
     apiKey, searchDocuments, suggestions, setSuggestions, documents,
+    documentSharingConsent, grantDocumentSharingConsent,
   } = useStore();
   const bottomRef = useRef<HTMLDivElement>(null);
   const [selectedSuggestions, setSelectedSuggestions] = useState<Set<string>>(new Set());
@@ -80,19 +82,16 @@ export const ChatArea: React.FC = () => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Clear selected suggestions when suggestions change (new file uploaded)
-  useEffect(() => {
-    setSelectedSuggestions(new Set());
-  }, [suggestions]);
-
   const runPrompt = async (prompt: string) => {
     if (!apiKey || isLoading) return;
+
+    const retrieved = searchDocuments(prompt, 5);
+    if (retrieved.length > 0 && !ensureDocumentSharingConsent(documentSharingConsent, grantDocumentSharingConsent)) return;
 
     const { setIsLoading } = useStore.getState();
     setIsLoading(true);
     addMessage({ role: 'user', content: prompt });
 
-    const retrieved = searchDocuments(prompt, 5);
     const retrievedContext = retrieved.length > 0
       ? retrieved.map(r => `[From: ${r.chunk.documentName}]\n${r.chunk.content}`).join('\n\n---\n\n')
       : '';
@@ -133,7 +132,7 @@ export const ChatArea: React.FC = () => {
   /** Toggle a suggestion chip on/off */
   const toggleSuggestion = (s: string) => {
     setSelectedSuggestions(prev => {
-      const next = new Set(prev);
+      const next = new Set([...prev].filter(item => suggestions.includes(item)));
       if (next.has(s)) next.delete(s);
       else next.add(s);
       return next;
@@ -142,8 +141,9 @@ export const ChatArea: React.FC = () => {
 
   /** Send all selected suggestions as one combined question */
   const sendSelectedSuggestions = async () => {
-    if (selectedSuggestions.size === 0) return;
-    const combined = Array.from(selectedSuggestions).join('\n\n');
+    const activeSelections = suggestions.filter(item => selectedSuggestions.has(item));
+    if (activeSelections.length === 0) return;
+    const combined = activeSelections.join('\n\n');
     setSuggestions([]);
     setSelectedSuggestions(new Set());
     await runPrompt(combined);
@@ -151,6 +151,7 @@ export const ChatArea: React.FC = () => {
 
   const modeInfo = MODE_STARTERS[settings.mode];
   const readyDocs = documents.filter(d => d.status === 'ready').length;
+  const selectedSuggestionCount = suggestions.filter(item => selectedSuggestions.has(item)).length;
 
   return (
     <div className="flex-1 flex flex-col min-h-0 w-full">
@@ -180,7 +181,7 @@ export const ChatArea: React.FC = () => {
                 { icon: '📄', label: 'Multi-format' },
                 { icon: '🎯', label: 'Rubric' },
                 { icon: '⚡', label: 'Streaming' },
-                { icon: '🔒', label: 'Private' },
+                { icon: '🔒', label: 'Local parsing' },
               ].map(f => (
                 <span key={f.label} className="glass px-2.5 py-1 rounded-full text-xs text-slate-400 flex items-center gap-1">
                   <span>{f.icon}</span> {f.label}
@@ -209,13 +210,13 @@ export const ChatArea: React.FC = () => {
                     </button>
                   ))}
                 </div>
-                {selectedSuggestions.size > 0 && (
+                {selectedSuggestionCount > 0 && (
                   <div className="flex gap-2 justify-center">
                     <button
                       onClick={sendSelectedSuggestions}
                       className="px-5 py-2 rounded-xl bg-gradient-to-r from-scholar-600 to-purple-600 text-white text-sm font-medium hover:from-scholar-500 hover:to-purple-500 transition-all glow"
                     >
-                      Ask {selectedSuggestions.size > 1 ? `${selectedSuggestions.size} questions` : 'question'} →
+                      Ask {selectedSuggestionCount > 1 ? `${selectedSuggestionCount} questions` : 'question'} →
                     </button>
                     <button
                       onClick={() => setSelectedSuggestions(new Set())}

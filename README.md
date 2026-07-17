@@ -14,7 +14,7 @@ An intelligent academic assistant built with React, TypeScript, and Google Gemin
 
 ## Tech Stack
 
-- **Frontend:** React 18, TypeScript, Vite
+- **Frontend:** React 19, TypeScript, Vite 5
 - **Styling:** Tailwind CSS
 - **AI Model:** Google Gemini 2.5 Flash (via Gemini API)
 - **File Parsing:** pdf.js, mammoth, xlsx, jszip
@@ -31,7 +31,6 @@ An intelligent academic assistant built with React, TypeScript, and Google Gemin
 ### Installation
 
 ```bash
-cd scholar-ai
 npm install
 npm run dev
 ```
@@ -44,17 +43,27 @@ Open `http://localhost:5173`, enter your Gemini API key, and start chatting.
 npm run build
 ```
 
-Output is in `scholar-ai/dist/`.
+Output is in `dist/`.
 
 ## Deployment
 
 This project is configured for one-click Netlify deployment.
 
 1. Connect this repository to Netlify
-2. Set **Base directory** to `scholar-ai`
+2. Leave **Base directory** empty (the repository root is canonical)
 3. Set **Build command** to `npm run build`
-4. Set **Publish directory** to `scholar-ai/dist`
+4. Set **Publish directory** to `dist`
 5. Deploy
+
+The root `netlify.toml` contains the same settings and pins the build runtime to Node.js 20.
+
+## Progressive Web App
+
+Scholar AI installs as a PWA and precaches only its static application shell. The service worker has no runtime cache routes: Gemini API requests, uploaded files, extracted document content, chat messages, API keys, and other user data are never placed in the PWA cache.
+
+## Architecture and Release Alignment
+
+The repository root is the canonical application and deployment source. The legacy `scholar-ai/` tree is preserved for historical reference but is not part of the root build. See [`docs/assessment-and-roadmap-alignment.md`](docs/assessment-and-roadmap-alignment.md) for the verified baseline, roadmap boundaries, and release runbook.
 
 ## Privacy
 

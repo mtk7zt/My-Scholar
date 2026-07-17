@@ -33,6 +33,31 @@ export type PdfErrorCode =
   | 'no-text'         // PDF opened fine but every page has an empty text layer (scanned/image-only)
   | 'load-failed';    // Worker failed to initialise or dynamic import failed
 
+export type DocumentLimitCode =
+  | 'file-too-large'
+  | 'pdf-page-limit'
+  | 'zip-entry-limit'
+  | 'zip-expanded-size-limit';
+
+export const DOCUMENT_LIMITS = {
+  maxFileSizeBytes: 25 * 1024 * 1024,
+  maxDocumentsPerSession: 10,
+  maxPdfPages: 500,
+  maxZipEntries: 200,
+  maxZipExpandedBytes: 100 * 1024 * 1024,
+  pdfPageConcurrency: 4,
+} as const;
+
+export class DocumentLimitError extends Error {
+  readonly code: DocumentLimitCode;
+
+  constructor(code: DocumentLimitCode, message: string) {
+    super(message);
+    this.name = 'DocumentLimitError';
+    this.code = code;
+  }
+}
+
 export class PdfExtractionError extends Error {
   readonly code: PdfErrorCode;
   constructor(code: PdfErrorCode, detail?: string) {
@@ -111,6 +136,64 @@ export interface PdfExtractionResult {
  * no meaningful text layer (i.e. it is likely a scanned/image-only PDF).
  */
 const MIN_CHARS_PER_PAGE = 30;
+const OCR_RENDER_SCALE = 2;
+const OCR_MAX_CANVAS_DIMENSION = 3000;
+
+type PdfDocument = Awaited<ReturnType<typeof import('pdfjs-dist').getDocument>['promise']>;
+
+async function recognizePdfPage(
+  pdf: PdfDocument,
+  pageNum: number,
+  worker: Awaited<ReturnType<typeof import('tesseract.js').createWorker>>,
+): Promise<string> {
+  const page = await pdf.getPage(pageNum);
+  const baseViewport = page.getViewport({ scale: 1 });
+  const longestSide = Math.max(baseViewport.width, baseViewport.height);
+  const scale = Math.min(OCR_RENDER_SCALE, OCR_MAX_CANVAS_DIMENSION / longestSide);
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d', { alpha: false });
+  if (!context) throw new Error('Canvas rendering is unavailable');
+
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+
+  try {
+    await page.render({ canvas, canvasContext: context, viewport }).promise;
+    const result = await worker.recognize(canvas);
+    return result.data.text.trim();
+  } finally {
+    canvas.width = 0;
+    canvas.height = 0;
+    page.cleanup();
+  }
+}
+
+async function extractPagesWithOcr(
+  pdf: PdfDocument,
+  pageNumbers: number[],
+): Promise<Map<number, string>> {
+  const { createWorker } = await import('tesseract.js');
+  const worker = await createWorker('eng', 1, {
+    workerPath: '/tesseract/worker.min.js',
+    corePath: '/tesseract',
+    langPath: '/tessdata',
+    gzip: true,
+    cacheMethod: 'none',
+  });
+  const recognized = new Map<number, string>();
+
+  try {
+    for (const pageNum of pageNumbers) {
+      const text = await recognizePdfPage(pdf, pageNum, worker);
+      if (text) recognized.set(pageNum, text);
+    }
+  } finally {
+    await worker.terminate();
+  }
+
+  return recognized;
+}
 
 // ---------------------------------------------------------------------------
 // pdf.js module cache (Fix #2 — load once per session)
@@ -124,16 +207,13 @@ async function getPdfjsLib(): Promise<typeof import('pdfjs-dist')> {
   let lib: typeof import('pdfjs-dist');
   try {
     lib = await import('pdfjs-dist');
-    console.log('[Scholar:PDF] pdfjs-dist loaded, version:', (lib as any).version);
-  } catch (importErr) {
-    console.error('[Scholar:PDF] CATCH getPdfjsLib — dynamic import failed:', importErr);
+  } catch {
     throw new PdfExtractionError('load-failed');
   }
 
   // Fix #1: Vite resolves pdfWorkerUrl to the correct hashed asset path at build time.
   // This guarantees the worker is served locally — no CDN, no hardcoded path.
   lib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
-  console.log('[Scholar:PDF] workerSrc set to:', lib.GlobalWorkerOptions.workerSrc);
 
   pdfjsLibCache = lib;
   return lib;
@@ -153,44 +233,53 @@ async function getPdfjsLib(): Promise<typeof import('pdfjs-dist')> {
  *  - Text quality check: detects scanned/image-only PDFs that silently return empty strings
  */
 async function extractPDF(file: File): Promise<PdfExtractionResult> {
-  console.log('[Scholar:PDF] extractPDF START — file:', file.name, 'size:', file.size);
-
   const pdfjsLib = await getPdfjsLib(); // throws PdfExtractionError('load-failed') on failure
 
   const arrayBuffer = await file.arrayBuffer();
-  console.log('[Scholar:PDF] arrayBuffer loaded, byteLength:', arrayBuffer.byteLength);
 
   // Open the PDF document — this is where encrypted / corrupt / XFA errors surface.
   let pdf: Awaited<ReturnType<typeof pdfjsLib.getDocument>['promise']>;
   try {
     pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-    console.log('[Scholar:PDF] getDocument resolved, numPages:', pdf.numPages);
   } catch (err) {
-    console.error('[Scholar:PDF] CATCH getDocument —');
-    console.error('  raw error object:', err);
-    console.error('  constructor.name:', (err as any)?.constructor?.name);
-    console.error('  message:', (err as any)?.message);
-    console.error('  stack:', (err as any)?.stack);
     const code = classifyPdfJsError(err);
-    console.error('  classified code:', code);
     throw new PdfExtractionError(code, err instanceof Error ? err.message : undefined);
   }
 
   const totalPages = pdf.numPages;
+  if (totalPages > DOCUMENT_LIMITS.maxPdfPages) {
+    throw new DocumentLimitError(
+      'pdf-page-limit',
+      'PDF has ' + totalPages + ' pages; the session limit is ' + DOCUMENT_LIMITS.maxPdfPages + ' pages',
+    );
+  }
   const pageNumbers = Array.from({ length: totalPages }, (_, i) => i + 1);
 
-  // Promise.allSettled — a single failing page no longer aborts the whole document.
-  const results = await Promise.allSettled(
-    pageNumbers.map(async (pageNum) => {
-      const page = await pdf.getPage(pageNum);
-      const textContent = await page.getTextContent();
-      const pageText = textContent.items
-        .map((item: any) => item.str)
-        .join(' ')
-        .trim();
-      return { pageNum, pageText };
-    })
+  const results: PromiseSettledResult<{ pageNum: number; pageText: string }>[] =
+    new Array(totalPages);
+  let nextPageIndex = 0;
+
+  const workers = Array.from(
+    { length: Math.min(DOCUMENT_LIMITS.pdfPageConcurrency, totalPages) },
+    async () => {
+      while (nextPageIndex < pageNumbers.length) {
+        const pageIndex = nextPageIndex++;
+        const pageNum = pageNumbers[pageIndex];
+        try {
+          const page = await pdf.getPage(pageNum);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items
+            .map(item => ('str' in item ? item.str : ''))
+            .join(' ')
+            .trim();
+          results[pageIndex] = { status: 'fulfilled', value: { pageNum, pageText } };
+        } catch (reason) {
+          results[pageIndex] = { status: 'rejected', reason };
+        }
+      }
+    },
   );
+  await Promise.all(workers);
 
   // Partition into succeeded and failed pages.
   const succeeded: { pageNum: number; pageText: string }[] = [];
@@ -206,43 +295,56 @@ async function extractPDF(file: File): Promise<PdfExtractionResult> {
     }
   }
 
-  console.log('[Scholar:PDF] allSettled done — succeeded:', succeeded.length, 'failed:', failedPageNums.length, 'failedPages:', failedPageNums);
-
   // Hard failure — not a single page could be read.
   if (succeeded.length === 0) {
-    console.error('[Scholar:PDF] THROW corrupt — all pages failed');
     throw new PdfExtractionError('corrupt', `All ${totalPages} pages failed to render`);
   }
 
-  // Assemble text in page order.
-  const fullText = succeeded
-    .sort((a, b) => a.pageNum - b.pageNum)
-    .map(({ pageNum, pageText }) => `\n[Page ${pageNum}]\n${pageText}`)
-    .join('');
+  const lowTextPages = succeeded
+    .filter(({ pageText }) => pageText.trim().length < MIN_CHARS_PER_PAGE)
+    .map(({ pageNum }) => pageNum);
+  let ocrPageCount = 0;
 
-  const pagesExtracted = succeeded.length;
-
-  // Text quality check — detect scanned / image-only PDFs.
-  // We only run this when ALL pages rendered (no hard failures), because
-  // a partial extraction with some empty pages is a different problem.
-  if (failedPageNums.length === 0) {
-    const totalChars = fullText.replace(/\[Page \d+\]/g, '').trim().length;
-    const avgCharsPerPage = totalChars / totalPages;
-    console.log('[Scholar:PDF] text quality check — totalChars:', totalChars, 'avgCharsPerPage:', avgCharsPerPage.toFixed(1), 'threshold:', MIN_CHARS_PER_PAGE);
-
-    if (avgCharsPerPage < MIN_CHARS_PER_PAGE) {
-      console.error('[Scholar:PDF] THROW no-text — scanned/image-only PDF detected');
-      throw new PdfExtractionError('no-text');
+  if (lowTextPages.length > 0) {
+    try {
+      const ocrText = await extractPagesWithOcr(pdf, lowTextPages);
+      for (const result of succeeded) {
+        const recognizedText = ocrText.get(result.pageNum);
+        if (recognizedText) {
+          result.pageText = recognizedText;
+          ocrPageCount += 1;
+        }
+      }
+    } catch (err) {
+      throw new PdfExtractionError(
+        'no-text',
+        err instanceof Error ? err.message : 'OCR failed to initialize',
+      );
     }
   }
 
-  // Build the result — attach a warning if some pages were skipped.
-  const warning =
-    failedPageNums.length > 0
-      ? `${failedPageNums.length} page${failedPageNums.length > 1 ? 's' : ''} could not be read and were skipped (page${failedPageNums.length > 1 ? 's' : ''} ${failedPageNums.join(', ')})`
-      : undefined;
+  const readablePages = succeeded.filter(({ pageText }) => pageText.trim().length > 0);
+  if (readablePages.length === 0) throw new PdfExtractionError('no-text');
 
-  console.log('[Scholar:PDF] extractPDF SUCCESS — pagesExtracted:', pagesExtracted, '/', totalPages, 'warning:', warning ?? 'none', 'textLength:', fullText.length);
+  const fullText = readablePages
+    .sort((a, b) => a.pageNum - b.pageNum)
+    .map(({ pageNum, pageText }) => `\n[Page ${pageNum}]\n${pageText}`)
+    .join('');
+  const pagesExtracted = readablePages.length;
+
+  const warnings: string[] = [];
+  if (ocrPageCount > 0) {
+    warnings.push(`OCR was used for ${ocrPageCount} scanned page${ocrPageCount > 1 ? 's' : ''}`);
+  }
+  if (failedPageNums.length > 0) {
+    warnings.push(`${failedPageNums.length} page${failedPageNums.length > 1 ? 's' : ''} could not be read and were skipped (page${failedPageNums.length > 1 ? 's' : ''} ${failedPageNums.join(', ')})`);
+  }
+  const emptyPageCount = succeeded.length - readablePages.length;
+  if (emptyPageCount > 0) {
+    warnings.push(`${emptyPageCount} page${emptyPageCount > 1 ? 's were' : ' was'} blank or could not be recognized`);
+  }
+  const warning = warnings.length > 0 ? warnings.join('. ') : undefined;
+
   return { text: fullText, totalPages, pagesExtracted, warning };
 }
 
@@ -253,8 +355,7 @@ async function extractDOCX(file: File): Promise<string> {
     const arrayBuffer = await file.arrayBuffer();
     const result = await mammoth.extractRawText({ arrayBuffer });
     return result.value;
-  } catch (err) {
-    console.error('DOCX extraction error:', err);
+  } catch {
     throw new Error('Failed to extract DOCX text');
   }
 }
@@ -272,8 +373,7 @@ async function extractXLSX(file: File): Promise<string> {
       text += `\n[Sheet: ${sheetName}]\n${csv}`;
     });
     return text;
-  } catch (err) {
-    console.error('XLSX extraction error:', err);
+  } catch {
     throw new Error('Failed to extract XLSX text');
   }
 }
@@ -303,8 +403,7 @@ async function extractPPTX(file: File): Promise<string> {
       }
     }
     return text || 'No text content found in presentation';
-  } catch (err) {
-    console.error('PPTX extraction error:', err);
+  } catch {
     throw new Error('Failed to extract PPTX text');
   }
 }
@@ -327,6 +426,23 @@ async function extractZIP(file: File): Promise<string> {
     ];
 
     const fileEntries = Object.entries(zip.files).filter(([, f]) => !f.dir);
+    if (fileEntries.length > DOCUMENT_LIMITS.maxZipEntries) {
+      throw new DocumentLimitError(
+        'zip-entry-limit',
+        'ZIP contains ' + fileEntries.length + ' files; the session limit is ' + DOCUMENT_LIMITS.maxZipEntries,
+      );
+    }
+
+    const expandedBytes = fileEntries.reduce((total, [, zipFile]) => {
+      const metadata = zipFile as typeof zipFile & { _data?: { uncompressedSize?: number } };
+      return total + (metadata._data?.uncompressedSize ?? 0);
+    }, 0);
+    if (expandedBytes > DOCUMENT_LIMITS.maxZipExpandedBytes) {
+      throw new DocumentLimitError(
+        'zip-expanded-size-limit',
+        'Expanded ZIP content exceeds the ' + formatFileSize(DOCUMENT_LIMITS.maxZipExpandedBytes) + ' limit',
+      );
+    }
 
     for (const [name, zipFile] of fileEntries) {
       const ext = '.' + name.split('.').pop()?.toLowerCase();
@@ -342,8 +458,8 @@ async function extractZIP(file: File): Promise<string> {
 
     return text || 'No readable text files found in ZIP';
   } catch (err) {
-    console.error('ZIP extraction error:', err);
-    throw new Error('Failed to extract ZIP contents');
+    if (err instanceof DocumentLimitError) throw err;
+    throw new Error('Failed to extract ZIP contents', { cause: err });
   }
 }
 
@@ -375,13 +491,17 @@ export interface ExtractionResult {
  */
 export async function extractFileText(file: File): Promise<ExtractionResult> {
   const ext = file.name.split('.').pop()?.toLowerCase() || '';
-  console.log('[Scholar:extractFileText] called — ext:', ext, 'file:', file.name);
+  if (file.size > DOCUMENT_LIMITS.maxFileSizeBytes) {
+    throw new DocumentLimitError(
+      'file-too-large',
+      'File is ' + formatFileSize(file.size) + '; the limit is ' + formatFileSize(DOCUMENT_LIMITS.maxFileSizeBytes),
+    );
+  }
 
   switch (ext) {
     case 'pdf': {
       // extractPDF returns a PdfExtractionResult — pass it through directly.
       const result = await extractPDF(file);
-      console.log('[Scholar:extractFileText] PDF result — pagesExtracted:', result.pagesExtracted, 'totalPages:', result.totalPages, 'warning:', result.warning ?? 'none');
       return result;
     }
     case 'docx':

@@ -11,6 +11,23 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      injectRegister: 'auto',
+      includeAssets: ['favicon.svg'],
+      workbox: {
+        // Precache only versioned application-shell assets produced by Vite.
+        // Gemini requests, uploaded documents, and user data are never cached.
+        globPatterns: ['**/*.{html,js,css,mjs,svg,png,ico,woff2}'],
+        globIgnores: ['icon-*.png', 'favicon.svg', 'tesseract/**', 'tessdata/**'],
+        navigateFallback: '/index.html',
+        navigateFallbackDenylist: [/^\/api(?:\/|$)/],
+        runtimeCaching: [],
+        cleanupOutdatedCaches: true,
+        clientsClaim: true,
+        skipWaiting: true,
+      },
+      devOptions: {
+        enabled: false,
+      },
       manifest: {
         name: 'My Scholar',
         short_name: 'My Scholar',
@@ -29,6 +46,12 @@ export default defineConfig({
             src: '/icon-512.png',
             sizes: '512x512',
             type: 'image/png',
+          },
+          {
+            src: '/icon-512.png',
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'maskable',
           },
         ],
       },
@@ -56,7 +79,6 @@ export default defineConfig({
     include: ['mammoth', 'jszip'],
     exclude: ['pdfjs-dist'],
   },
-  assetsInclude: ['**/*.mjs'],
   build: {
     outDir: 'dist',
     sourcemap: false,

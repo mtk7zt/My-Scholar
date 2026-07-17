@@ -31,20 +31,21 @@ const TONES: { value: Tone; label: string; icon: string; desc: string }[] = [
 export const SettingsModal: React.FC = () => {
   const {
     settingsOpen, setSettingsOpen,
-    apiKey, setApiKey,
+    apiKey, apiKeyRemembered, setApiKey, forgetApiKey,
     profile, setProfile,
     settings, setMode, setTone, toggleRubric, updateSettings,
   } = useStore();
 
   const [showKey, setShowKey] = useState(false);
   const [keyInput, setKeyInput] = useState(apiKey);
+  const [rememberKey, setRememberKey] = useState(apiKeyRemembered);
   const [activeTab, setActiveTab] = useState<'profile' | 'mode' | 'tone' | 'rubric'>('profile');
   const [showAvatarPicker, setShowAvatarPicker] = useState(false);
 
   if (!settingsOpen) return null;
 
   const handleSaveKey = () => {
-    setApiKey(keyInput.trim());
+    setApiKey(keyInput.trim(), rememberKey);
   };
 
   const rubric = settings.rubric;
@@ -196,16 +197,20 @@ export const SettingsModal: React.FC = () => {
                   </button>
                   {apiKey && (
                     <button
-                      onClick={() => { setApiKey(''); setKeyInput(''); }}
+                      onClick={() => { forgetApiKey(); setKeyInput(''); setRememberKey(false); }}
                       className="px-4 py-2 rounded-xl bg-red-900/30 border border-red-800/50 text-red-400 text-xs hover:bg-red-900/50 transition-all"
                     >
-                      Clear
+                      Forget
                     </button>
                   )}
                 </div>
+                <label className='mt-2 flex items-start gap-2 text-xs text-slate-400 cursor-pointer'>
+                  <input type='checkbox' checked={rememberKey} onChange={e => setRememberKey(e.target.checked)} />
+                  <span>Remember on this device. Otherwise the key stays only until this tab closes or refreshes.</span>
+                </label>
                 <div className="mt-2 p-2.5 rounded-lg bg-slate-800/50 border border-slate-700">
                   <p className="text-xs text-slate-500">
-                    🔒 Stored in your browser only. Get a free key at{' '}
+                    🔒 {apiKeyRemembered ? 'Remembered on this device.' : 'Session-only; not saved on this device.'} Prompts are sent to Google Gemini. Get a free key at{' '}
                     <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-scholar-400 underline">
                       Google AI Studio
                     </a>
