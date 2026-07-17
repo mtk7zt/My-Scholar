@@ -17,6 +17,7 @@ describe('document limits', () => {
       maxOcrPages: 50,
       maxOcrPixels: 16_000_000,
       maxOcrDimension: 3000,
+      ocrInitializationTimeoutMs: 2 * 60_000,
       ocrPageTimeoutMs: 45_000,
       ocrDocumentTimeoutMs: 10 * 60_000,
     });

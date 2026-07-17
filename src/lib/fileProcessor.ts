@@ -56,6 +56,7 @@ export const DOCUMENT_LIMITS = {
   maxOcrPages: 50,
   maxOcrPixels: 16_000_000,
   maxOcrDimension: 3000,
+  ocrInitializationTimeoutMs: 2 * 60_000,
   ocrPageTimeoutMs: 45_000,
   ocrDocumentTimeoutMs: 10 * 60_000,
 } as const;
@@ -178,12 +179,54 @@ const MIN_CHARS_PER_PAGE = 30;
 const OCR_RENDER_SCALE = 2;
 let activeOcrJob: string | null = null;
 
+type TesseractWorker = Awaited<ReturnType<typeof import('tesseract.js').createWorker>>;
+
+async function createOcrWorker(options: DocumentProcessingOptions): Promise<TesseractWorker> {
+  const { createWorker } = await import('tesseract.js');
+  const workerPromise = createWorker(options.ocrLanguage, 1, {
+    workerPath: new URL('/tesseract/worker.min.js', window.location.origin).href,
+    corePath: new URL('/tesseract/', window.location.origin).href,
+    langPath: new URL('/tessdata/', window.location.origin).href,
+    gzip: true,
+    cacheMethod: 'none',
+  });
+
+  try {
+    return await withTimeout(
+      workerPromise,
+      DOCUMENT_LIMITS.ocrInitializationTimeoutMs,
+      options.signal,
+      'OCR took too long to start. Check your connection and retry.',
+    );
+  } catch (error) {
+    // createWorker cannot be synchronously cancelled. If it completes after a
+    // timeout/cancellation, terminate it immediately instead of leaking it.
+    void workerPromise.then(worker => worker.terminate()).catch(() => undefined);
+    if (error instanceof DocumentProcessingError) throw error;
+    const detail = error instanceof Error ? error.message.toLowerCase() : '';
+    if (detail.includes('traineddata') || detail.includes('language')) {
+      throw new DocumentProcessingError(
+        'ocr-language-download',
+        `The ${options.ocrLanguage === 'fra' ? 'French' : 'English'} OCR language data could not be loaded. Check your connection and retry.`,
+        'ocr',
+        true,
+      );
+    }
+    throw new DocumentProcessingError(
+      'ocr-initialization',
+      'OCR could not start in this browser. Refresh the app and retry the document.',
+      'ocr',
+      true,
+    );
+  }
+}
+
 type PdfDocument = Awaited<ReturnType<typeof import('pdfjs-dist').getDocument>['promise']>;
 
 async function recognizePdfPage(
   pdf: PdfDocument,
   pageNum: number,
-  worker: Awaited<ReturnType<typeof import('tesseract.js').createWorker>>,
+  worker: TesseractWorker,
   signal: AbortSignal,
 ): Promise<string> {
   throwIfAborted(signal);
@@ -239,15 +282,13 @@ async function extractPagesWithOcr(
     throw new DocumentProcessingError('ocr-initialization', 'Another OCR job is already running; wait or cancel it first', 'ocr', true);
   }
   activeOcrJob = options.documentId;
-  const { createWorker } = await import('tesseract.js');
-  let worker: Awaited<ReturnType<typeof createWorker>> | undefined;
+  let worker: TesseractWorker | undefined;
   const recognized = new Map<number, string>();
 
   try {
     throwIfAborted(options.signal);
-    worker = await withTimeout(createWorker(options.ocrLanguage, 1, {
-      workerPath: '/tesseract/worker.min.js', corePath: '/tesseract', langPath: '/tessdata', gzip: true, cacheMethod: 'none',
-    }), DOCUMENT_LIMITS.ocrPageTimeoutMs, options.signal, 'OCR language assets could not be loaded');
+    options.onProgress?.({ documentId: options.documentId, stage: 'ocr', completedUnits: 0, totalUnits: pageNumbers.length, message: 'Starting OCR' });
+    worker = await createOcrWorker(options);
     for (let index = 0; index < pageNumbers.length; index += 1) {
       const pageNum = pageNumbers[index];
       options.onProgress?.({ documentId: options.documentId, stage: 'ocr', completedUnits: index, totalUnits: pageNumbers.length, message: `OCR page ${pageNum}` });
@@ -268,14 +309,19 @@ function throwIfAborted(signal: AbortSignal): void {
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, signal: AbortSignal, message: string): Promise<T> {
   let timer = 0;
+  let abortHandler: (() => void) | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = window.setTimeout(() => reject(new DocumentProcessingError('ocr-timeout', message, 'ocr', true)), timeoutMs);
   });
   const aborted = new Promise<never>((_, reject) => {
-    signal.addEventListener('abort', () => reject(new DocumentProcessingError('user-cancellation', 'Processing was cancelled', 'cancelled', true)), { once: true });
+    abortHandler = () => reject(new DocumentProcessingError('user-cancellation', 'Processing was cancelled', 'cancelled', true));
+    signal.addEventListener('abort', abortHandler, { once: true });
   });
   try { return await Promise.race([promise, timeout, aborted]); }
-  finally { window.clearTimeout(timer); }
+  finally {
+    window.clearTimeout(timer);
+    if (abortHandler) signal.removeEventListener('abort', abortHandler);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +438,7 @@ async function extractPDF(file: File, options: DocumentProcessingOptions): Promi
     .filter(({ pageText }) => pageText.trim().length < MIN_CHARS_PER_PAGE)
     .map(({ pageNum }) => pageNum);
   let ocrPageCount = 0;
+  let ocrFailure: DocumentProcessingError | undefined;
 
   if (lowTextPages.length > 0) {
     try {
@@ -410,12 +457,20 @@ async function extractPDF(file: File, options: DocumentProcessingOptions): Promi
       }
     } catch (err) {
       if (err instanceof DocumentProcessingError && err.code === 'user-cancellation') throw err;
+      ocrFailure = err instanceof DocumentProcessingError
+        ? err
+        : new DocumentProcessingError('ocr-initialization', 'OCR could not start in this browser. Refresh the app and retry the document.', 'ocr', true);
       warningsFromError(err, failedPageNums, lowTextPages);
     }
   }
 
   const readablePages = succeeded.filter(({ pageText }) => pageText.trim().length > 0);
-  if (readablePages.length === 0) throw new PdfExtractionError('no-text');
+  // A fully scanned PDF depends on OCR. Never hide the actionable OCR error
+  // behind the old "no text layer" classification message.
+  if (readablePages.length === 0) {
+    if (ocrFailure) throw ocrFailure;
+    throw new DocumentProcessingError('empty-document', 'OCR finished, but no readable text was found in this scanned PDF.', 'ocr', true);
+  }
 
   const fullText = readablePages
     .sort((a, b) => a.pageNum - b.pageNum)
@@ -424,6 +479,7 @@ async function extractPDF(file: File, options: DocumentProcessingOptions): Promi
   const pagesExtracted = readablePages.length;
 
   const warnings: string[] = [];
+  if (ocrFailure) warnings.push(ocrFailure.message);
   if (ocrPageCount > 0) {
     warnings.push(`OCR was used for ${ocrPageCount} scanned page${ocrPageCount > 1 ? 's' : ''}`);
   }
@@ -666,11 +722,10 @@ async function extractImage(file: File, options: DocumentProcessingOptions): Pro
     bitmap.close(); activeOcrJob = null;
     throw new DocumentProcessingError('ocr-memory-limit', 'This image is too large for safe OCR on this device', 'ocr');
   }
-  const { createWorker } = await import('tesseract.js');
-  let worker: Awaited<ReturnType<typeof createWorker>> | undefined;
+  let worker: TesseractWorker | undefined;
   try {
     options.onProgress?.({ documentId: options.documentId, stage: 'ocr', completedUnits: 0, totalUnits: 1, message: 'Reading image text' });
-    worker = await withTimeout(createWorker(options.ocrLanguage, 1, { workerPath: '/tesseract/worker.min.js', corePath: '/tesseract', langPath: '/tessdata', gzip: true, cacheMethod: 'none' }), DOCUMENT_LIMITS.ocrPageTimeoutMs, options.signal, 'OCR language assets could not be loaded');
+    worker = await createOcrWorker(options);
     const canvas = document.createElement('canvas');
     canvas.width = bitmap.width; canvas.height = bitmap.height;
     canvas.getContext('2d', { alpha: false })?.drawImage(bitmap, 0, 0);
