@@ -19,9 +19,13 @@ import { ChatArea } from './components/ChatArea';
 import { Header } from './components/Header';
 import { SettingsModal } from './components/SettingsModal';
 import { useStore } from './store/useStore';
+import { applyTheme } from './lib/theme';
+import { PwaStatus } from './components/PwaStatus';
 
 function App() {
-  const { newChat } = useStore();
+  const { newChat, settings } = useStore();
+
+  useEffect(() => applyTheme(settings.theme), [settings.theme]);
 
   // Clear all session data when the tab closes or refreshes
   useEffect(() => {
@@ -34,10 +38,11 @@ function App() {
   }, [newChat]);
 
   return (
-    <div className="h-screen flex flex-col bg-[#0f0f1a] overflow-hidden">
+    <div className="app-shell h-screen flex flex-col overflow-hidden">
       <ApiKeyModal />
       <SettingsModal />
       <Header />
+      <PwaStatus />
       <div className="flex flex-1 min-h-0 relative overflow-hidden">
         <Sidebar />
         <main className="flex-1 flex flex-col min-h-0 min-w-0 w-full">

@@ -13,10 +13,17 @@
  *  - TXT / source code → FileReader API
  */
 
-import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 // Vite resolves this at build time to the correct hashed asset URL (e.g. /assets/pdf.worker-abc123.mjs)
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import type {
+  DocumentKind,
+  DocumentProcessingOptions,
+  DocumentProcessingStage,
+  ExtractionResult,
+} from '../types';
+
+export type { DocumentProcessingOptions, ExtractionResult, OcrLanguage } from '../types';
 
 // ---------------------------------------------------------------------------
 // Typed PDF error codes
@@ -46,7 +53,39 @@ export const DOCUMENT_LIMITS = {
   maxZipEntries: 200,
   maxZipExpandedBytes: 100 * 1024 * 1024,
   pdfPageConcurrency: 4,
+  maxOcrPages: 50,
+  maxOcrPixels: 16_000_000,
+  maxOcrDimension: 3000,
+  ocrPageTimeoutMs: 45_000,
+  ocrDocumentTimeoutMs: 10 * 60_000,
 } as const;
+
+export type DocumentProcessingErrorCode =
+  | 'invalid-file-signature' | 'unsupported-file-type' | 'file-too-large'
+  | 'too-many-session-documents' | 'pdf-page-limit' | 'encrypted-pdf'
+  | 'corrupt-pdf' | 'empty-document' | 'pdf-worker-initialization'
+  | 'pdf-page-extraction' | 'ocr-initialization' | 'ocr-language-download'
+  | 'ocr-timeout' | 'ocr-memory-limit' | 'user-cancellation'
+  | 'normalization-failure' | 'chunking-failure' | 'indexing-failure'
+  | 'gemini-network-failure' | 'consent-rejection';
+
+export class DocumentProcessingError extends Error {
+  readonly code: DocumentProcessingErrorCode;
+  readonly stage: DocumentProcessingStage;
+  readonly retryable: boolean;
+  readonly diagnostics: Record<string, string | number | boolean>;
+  constructor(
+    code: DocumentProcessingErrorCode,
+    message: string,
+    stage: DocumentProcessingStage,
+    retryable = false,
+    diagnostics: Record<string, string | number | boolean> = {},
+  ) {
+    super(message);
+    this.name = 'DocumentProcessingError';
+    this.code = code; this.stage = stage; this.retryable = retryable; this.diagnostics = diagnostics;
+  }
+}
 
 export class DocumentLimitError extends Error {
   readonly code: DocumentLimitCode;
@@ -137,7 +176,7 @@ export interface PdfExtractionResult {
  */
 const MIN_CHARS_PER_PAGE = 30;
 const OCR_RENDER_SCALE = 2;
-const OCR_MAX_CANVAS_DIMENSION = 3000;
+let activeOcrJob: string | null = null;
 
 type PdfDocument = Awaited<ReturnType<typeof import('pdfjs-dist').getDocument>['promise']>;
 
@@ -145,12 +184,18 @@ async function recognizePdfPage(
   pdf: PdfDocument,
   pageNum: number,
   worker: Awaited<ReturnType<typeof import('tesseract.js').createWorker>>,
+  signal: AbortSignal,
 ): Promise<string> {
+  throwIfAborted(signal);
   const page = await pdf.getPage(pageNum);
   const baseViewport = page.getViewport({ scale: 1 });
   const longestSide = Math.max(baseViewport.width, baseViewport.height);
-  const scale = Math.min(OCR_RENDER_SCALE, OCR_MAX_CANVAS_DIMENSION / longestSide);
+  const scale = Math.min(OCR_RENDER_SCALE, DOCUMENT_LIMITS.maxOcrDimension / longestSide);
   const viewport = page.getViewport({ scale });
+  if (viewport.width * viewport.height > DOCUMENT_LIMITS.maxOcrPixels) {
+    page.cleanup();
+    throw new DocumentProcessingError('ocr-memory-limit', 'This page is too large for safe OCR on this device', 'ocr');
+  }
   const canvas = document.createElement('canvas');
   const context = canvas.getContext('2d', { alpha: false });
   if (!context) throw new Error('Canvas rendering is unavailable');
@@ -159,8 +204,21 @@ async function recognizePdfPage(
   canvas.height = Math.ceil(viewport.height);
 
   try {
-    await page.render({ canvas, canvasContext: context, viewport }).promise;
-    const result = await worker.recognize(canvas);
+    const renderTask = page.render({ canvas, canvasContext: context, viewport });
+    const abortRender = () => renderTask.cancel();
+    signal.addEventListener('abort', abortRender, { once: true });
+    try {
+      await renderTask.promise;
+    } finally {
+      signal.removeEventListener('abort', abortRender);
+    }
+    throwIfAborted(signal);
+    const result = await withTimeout(
+      worker.recognize(canvas),
+      DOCUMENT_LIMITS.ocrPageTimeoutMs,
+      signal,
+      'OCR timed out on this page',
+    );
     return result.data.text.trim();
   } finally {
     canvas.width = 0;
@@ -172,27 +230,52 @@ async function recognizePdfPage(
 async function extractPagesWithOcr(
   pdf: PdfDocument,
   pageNumbers: number[],
+  options: DocumentProcessingOptions,
 ): Promise<Map<number, string>> {
+  if (pageNumbers.length > DOCUMENT_LIMITS.maxOcrPages) {
+    throw new DocumentProcessingError('ocr-memory-limit', `OCR is limited to ${DOCUMENT_LIMITS.maxOcrPages} pages per document`, 'ocr');
+  }
+  if (activeOcrJob && activeOcrJob !== options.documentId) {
+    throw new DocumentProcessingError('ocr-initialization', 'Another OCR job is already running; wait or cancel it first', 'ocr', true);
+  }
+  activeOcrJob = options.documentId;
   const { createWorker } = await import('tesseract.js');
-  const worker = await createWorker('eng', 1, {
-    workerPath: '/tesseract/worker.min.js',
-    corePath: '/tesseract',
-    langPath: '/tessdata',
-    gzip: true,
-    cacheMethod: 'none',
-  });
+  let worker: Awaited<ReturnType<typeof createWorker>> | undefined;
   const recognized = new Map<number, string>();
 
   try {
-    for (const pageNum of pageNumbers) {
-      const text = await recognizePdfPage(pdf, pageNum, worker);
+    throwIfAborted(options.signal);
+    worker = await withTimeout(createWorker(options.ocrLanguage, 1, {
+      workerPath: '/tesseract/worker.min.js', corePath: '/tesseract', langPath: '/tessdata', gzip: true, cacheMethod: 'none',
+    }), DOCUMENT_LIMITS.ocrPageTimeoutMs, options.signal, 'OCR language assets could not be loaded');
+    for (let index = 0; index < pageNumbers.length; index += 1) {
+      const pageNum = pageNumbers[index];
+      options.onProgress?.({ documentId: options.documentId, stage: 'ocr', completedUnits: index, totalUnits: pageNumbers.length, message: `OCR page ${pageNum}` });
+      const text = await recognizePdfPage(pdf, pageNum, worker, options.signal);
       if (text) recognized.set(pageNum, text);
     }
   } finally {
-    await worker.terminate();
+    await worker?.terminate().catch(() => undefined);
+    if (activeOcrJob === options.documentId) activeOcrJob = null;
   }
 
   return recognized;
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw new DocumentProcessingError('user-cancellation', 'Processing was cancelled', 'cancelled', true);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, signal: AbortSignal, message: string): Promise<T> {
+  let timer = 0;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(() => reject(new DocumentProcessingError('ocr-timeout', message, 'ocr', true)), timeoutMs);
+  });
+  const aborted = new Promise<never>((_, reject) => {
+    signal.addEventListener('abort', () => reject(new DocumentProcessingError('user-cancellation', 'Processing was cancelled', 'cancelled', true)), { once: true });
+  });
+  try { return await Promise.race([promise, timeout, aborted]); }
+  finally { window.clearTimeout(timer); }
 }
 
 // ---------------------------------------------------------------------------
@@ -232,10 +315,13 @@ async function getPdfjsLib(): Promise<typeof import('pdfjs-dist')> {
  *  - Partial extraction: returns whatever pages succeeded with a warning
  *  - Text quality check: detects scanned/image-only PDFs that silently return empty strings
  */
-async function extractPDF(file: File): Promise<PdfExtractionResult> {
+async function extractPDF(file: File, options: DocumentProcessingOptions): Promise<ExtractionResult> {
+  const startedAt = performance.now();
+  options.onProgress?.({ documentId: options.documentId, stage: 'reading', completedUnits: 0 });
   const pdfjsLib = await getPdfjsLib(); // throws PdfExtractionError('load-failed') on failure
 
   const arrayBuffer = await file.arrayBuffer();
+  throwIfAborted(options.signal);
 
   // Open the PDF document — this is where encrypted / corrupt / XFA errors surface.
   let pdf: Awaited<ReturnType<typeof pdfjsLib.getDocument>['promise']>;
@@ -254,6 +340,7 @@ async function extractPDF(file: File): Promise<PdfExtractionResult> {
     );
   }
   const pageNumbers = Array.from({ length: totalPages }, (_, i) => i + 1);
+  options.onProgress?.({ documentId: options.documentId, stage: 'extracting', completedUnits: 0, totalUnits: totalPages });
 
   const results: PromiseSettledResult<{ pageNum: number; pageText: string }>[] =
     new Array(totalPages);
@@ -273,6 +360,7 @@ async function extractPDF(file: File): Promise<PdfExtractionResult> {
             .join(' ')
             .trim();
           results[pageIndex] = { status: 'fulfilled', value: { pageNum, pageText } };
+          options.onProgress?.({ documentId: options.documentId, stage: 'extracting', completedUnits: pageIndex + 1, totalUnits: totalPages });
         } catch (reason) {
           results[pageIndex] = { status: 'rejected', reason };
         }
@@ -307,7 +395,12 @@ async function extractPDF(file: File): Promise<PdfExtractionResult> {
 
   if (lowTextPages.length > 0) {
     try {
-      const ocrText = await extractPagesWithOcr(pdf, lowTextPages);
+      const ocrText = await withTimeout(
+        extractPagesWithOcr(pdf, lowTextPages, options),
+        DOCUMENT_LIMITS.ocrDocumentTimeoutMs,
+        options.signal,
+        'OCR timed out for this document',
+      );
       for (const result of succeeded) {
         const recognizedText = ocrText.get(result.pageNum);
         if (recognizedText) {
@@ -316,10 +409,8 @@ async function extractPDF(file: File): Promise<PdfExtractionResult> {
         }
       }
     } catch (err) {
-      throw new PdfExtractionError(
-        'no-text',
-        err instanceof Error ? err.message : 'OCR failed to initialize',
-      );
+      if (err instanceof DocumentProcessingError && err.code === 'user-cancellation') throw err;
+      warningsFromError(err, failedPageNums, lowTextPages);
     }
   }
 
@@ -343,9 +434,24 @@ async function extractPDF(file: File): Promise<PdfExtractionResult> {
   if (emptyPageCount > 0) {
     warnings.push(`${emptyPageCount} page${emptyPageCount > 1 ? 's were' : ' was'} blank or could not be recognized`);
   }
-  const warning = warnings.length > 0 ? warnings.join('. ') : undefined;
+  pdf.cleanup();
+  return {
+    documentKind: 'pdf', text: normalizeExtractedText(fullText), pageCount: totalPages,
+    processedUnitCount: pagesExtracted, ocrLanguage: options.ocrLanguage,
+    usedOcr: ocrPageCount > 0, ocrUnits: succeeded.filter(p => lowTextPages.includes(p.pageNum) && p.pageText.length > 0).map(p => p.pageNum),
+    warnings, failedUnits: failedPageNums, partial: failedPageNums.length > 0 || emptyPageCount > 0,
+    durationMs: Math.round(performance.now() - startedAt),
+  };
+}
 
-  return { text: fullText, totalPages, pagesExtracted, warning };
+function warningsFromError(err: unknown, failed: number[], candidates: number[]): void {
+  for (const page of candidates) if (!failed.includes(page)) failed.push(page);
+  if (err instanceof DocumentProcessingError) return;
+}
+
+function normalizeExtractedText(text: string): string {
+  try { return text.normalize('NFKC').replace(/[\t ]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim(); }
+  catch { throw new DocumentProcessingError('normalization-failure', 'Extracted text could not be normalized', 'normalizing'); }
 }
 
 /** Extracts plain text from a DOCX file using mammoth. */
@@ -363,14 +469,15 @@ async function extractDOCX(file: File): Promise<string> {
 /** Converts each sheet in an XLSX workbook to CSV text. */
 async function extractXLSX(file: File): Promise<string> {
   try {
+    const ExcelJS = await import('exceljs');
     const arrayBuffer = await file.arrayBuffer();
-    const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(arrayBuffer);
     let text = '';
-    workbook.SheetNames.forEach(sheetName => {
-      const sheet = workbook.Sheets[sheetName];
-      const csv = XLSX.utils.sheet_to_csv(sheet);
-      text += `\n[Sheet: ${sheetName}]\n${csv}`;
+    workbook.eachSheet(sheet => {
+      const rows: string[] = [];
+      sheet.eachRow(row => rows.push((row.values as unknown[]).slice(1).map(value => String(value ?? '')).join(',')));
+      text += `\n[Sheet: ${sheet.name}]\n${rows.join('\n')}`;
     });
     return text;
   } catch {
@@ -477,19 +584,20 @@ async function extractText(file: File): Promise<string> {
  * Unified extraction result returned by extractFileText.
  * For non-PDF files, warning/pagesExtracted/totalPages are always undefined.
  */
-export interface ExtractionResult {
-  text: string;
-  warning?: string;
-  pagesExtracted?: number;
-  totalPages?: number;
-}
-
 /**
  * Routes a file to the correct extractor based on its extension.
  * Returns an ExtractionResult so callers can surface warnings and page stats.
  * Throws PdfExtractionError (typed) for PDF-specific failures.
  */
-export async function extractFileText(file: File): Promise<ExtractionResult> {
+export async function extractFileText(file: File, options?: Partial<DocumentProcessingOptions>): Promise<ExtractionResult> {
+  const fallbackController = new AbortController();
+  const resolved: DocumentProcessingOptions = {
+    documentId: options?.documentId ?? crypto.randomUUID(),
+    ocrLanguage: options?.ocrLanguage ?? 'eng',
+    signal: options?.signal ?? fallbackController.signal,
+    onProgress: options?.onProgress,
+  };
+  const startedAt = performance.now();
   const ext = file.name.split('.').pop()?.toLowerCase() || '';
   if (file.size > DOCUMENT_LIMITS.maxFileSizeBytes) {
     throw new DocumentLimitError(
@@ -498,31 +606,87 @@ export async function extractFileText(file: File): Promise<ExtractionResult> {
     );
   }
 
+  resolved.onProgress?.({ documentId: resolved.documentId, stage: 'validating', completedUnits: 0 });
+  const kind = await validateFileSignature(file, ext);
+  throwIfAborted(resolved.signal);
   switch (ext) {
     case 'pdf': {
       // extractPDF returns a PdfExtractionResult — pass it through directly.
-      const result = await extractPDF(file);
+      const result = await extractPDF(file, resolved);
       return result;
     }
+    case 'png': case 'jpg': case 'jpeg': case 'webp':
+      return extractImage(file, resolved);
     case 'docx':
     case 'doc':
-      return { text: await extractDOCX(file) };
+      return simpleResult('office', await extractDOCX(file), startedAt);
     case 'xlsx':
     case 'xls':
-      return { text: await extractXLSX(file) };
+      return simpleResult('office', await extractXLSX(file), startedAt);
     case 'pptx':
     case 'ppt':
-      return { text: await extractPPTX(file) };
+      return simpleResult('office', await extractPPTX(file), startedAt);
     case 'zip':
-      return { text: await extractZIP(file) };
+      return simpleResult('archive', await extractZIP(file), startedAt);
     default:
-      return { text: await extractText(file) };
+      return simpleResult(kind, await extractText(file), startedAt);
+  }
+}
+
+function simpleResult(kind: DocumentKind, text: string, startedAt: number): ExtractionResult {
+  const normalized = normalizeExtractedText(text);
+  if (!normalized) throw new DocumentProcessingError('empty-document', 'No readable content was found', 'extracting');
+  return { documentKind: kind, text: normalized, processedUnitCount: 1, usedOcr: false, ocrUnits: [], warnings: [], failedUnits: [], partial: false, durationMs: Math.round(performance.now() - startedAt) };
+}
+
+async function validateFileSignature(file: File, ext: string): Promise<DocumentKind> {
+  const bytes = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+  const ascii = String.fromCharCode(...bytes);
+  const pdf = ascii.startsWith('%PDF-');
+  const png = bytes[0] === 0x89 && ascii.slice(1, 4) === 'PNG';
+  const jpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  const webp = ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WEBP';
+  if (ext === 'pdf' && !pdf) throw new DocumentProcessingError('invalid-file-signature', 'This file is not a valid PDF', 'validating');
+  if (ext === 'png' && !png) throw new DocumentProcessingError('invalid-file-signature', 'This file is not a valid PNG image', 'validating');
+  if (['jpg', 'jpeg'].includes(ext) && !jpeg) throw new DocumentProcessingError('invalid-file-signature', 'This file is not a valid JPEG image', 'validating');
+  if (ext === 'webp' && !webp) throw new DocumentProcessingError('invalid-file-signature', 'This file is not a valid WebP image', 'validating');
+  if (pdf) return 'pdf';
+  if (png || jpeg || webp) return 'image';
+  if (ext === 'zip') return 'archive';
+  if (['doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx'].includes(ext)) return 'office';
+  return 'text';
+}
+
+async function extractImage(file: File, options: DocumentProcessingOptions): Promise<ExtractionResult> {
+  const startedAt = performance.now();
+  if (activeOcrJob && activeOcrJob !== options.documentId) throw new DocumentProcessingError('ocr-initialization', 'Another OCR job is already running', 'ocr', true);
+  activeOcrJob = options.documentId;
+  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  if (bitmap.width > DOCUMENT_LIMITS.maxOcrDimension || bitmap.height > DOCUMENT_LIMITS.maxOcrDimension || bitmap.width * bitmap.height > DOCUMENT_LIMITS.maxOcrPixels) {
+    bitmap.close(); activeOcrJob = null;
+    throw new DocumentProcessingError('ocr-memory-limit', 'This image is too large for safe OCR on this device', 'ocr');
+  }
+  const { createWorker } = await import('tesseract.js');
+  let worker: Awaited<ReturnType<typeof createWorker>> | undefined;
+  try {
+    options.onProgress?.({ documentId: options.documentId, stage: 'ocr', completedUnits: 0, totalUnits: 1, message: 'Reading image text' });
+    worker = await withTimeout(createWorker(options.ocrLanguage, 1, { workerPath: '/tesseract/worker.min.js', corePath: '/tesseract', langPath: '/tessdata', gzip: true, cacheMethod: 'none' }), DOCUMENT_LIMITS.ocrPageTimeoutMs, options.signal, 'OCR language assets could not be loaded');
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width; canvas.height = bitmap.height;
+    canvas.getContext('2d', { alpha: false })?.drawImage(bitmap, 0, 0);
+    const recognized = await withTimeout(worker.recognize(canvas), DOCUMENT_LIMITS.ocrPageTimeoutMs, options.signal, 'OCR timed out for this image');
+    canvas.width = 0; canvas.height = 0;
+    const text = normalizeExtractedText(recognized.data.text);
+    if (!text) throw new DocumentProcessingError('empty-document', 'No readable text was found in this image', 'ocr');
+    return { documentKind: 'image', text, imageCount: 1, processedUnitCount: 1, ocrLanguage: options.ocrLanguage, usedOcr: true, ocrUnits: [1], warnings: [], failedUnits: [], partial: false, durationMs: Math.round(performance.now() - startedAt) };
+  } finally {
+    bitmap.close(); await worker?.terminate().catch(() => undefined); if (activeOcrJob === options.documentId) activeOcrJob = null;
   }
 }
 
 /** All file extensions accepted by the upload UI. */
 export const SUPPORTED_EXTENSIONS = [
-  '.pdf', '.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls',
+  '.pdf', '.png', '.jpg', '.jpeg', '.webp', '.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls',
   '.txt', '.md', '.zip',
   '.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.c', '.cpp',
   '.h', '.cs', '.go', '.rs', '.rb', '.php', '.html', '.css',

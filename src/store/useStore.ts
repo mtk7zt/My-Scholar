@@ -10,7 +10,7 @@
  */
 
 import { create } from 'zustand';
-import type { Message, UploadedDocument, DocumentChunk, AppSettings, Mode, Tone, Rubric, RetrievedChunk } from '../types';
+import type { Message, UploadedDocument, DocumentChunk, AppSettings, Mode, Tone, Rubric, RetrievedChunk, OcrLanguage, ThemePreference } from '../types';
 import {
   generateEmbedding,
   cosineSimilarity,
@@ -37,6 +37,8 @@ interface Store {
   documents: UploadedDocument[];
   chunks: DocumentChunk[];
   uploadDocument: (file: File) => Promise<void>;
+  cancelDocument: (id: string) => void;
+  retryDocument: (id: string) => Promise<void>;
   removeDocument: (id: string) => void;
   clearDocuments: () => void;
   searchDocuments: (query: string, topK?: number) => RetrievedChunk[];
@@ -50,6 +52,8 @@ interface Store {
   setTone: (tone: Tone) => void;
   setRubric: (rubric: Rubric | null) => void;
   toggleRubric: () => void;
+  setTheme: (theme: ThemePreference) => void;
+  setOcrLanguage: (language: OcrLanguage) => void;
 
   // Profile
   profile: UserProfile;
@@ -102,7 +106,16 @@ const DEFAULT_SETTINGS: AppSettings = {
   rubric: DEFAULT_RUBRIC,
   rubricEnabled: false,
   streamingEnabled: true,
+  theme: readThemePreference(),
+  ocrLanguage: 'eng',
 };
+
+function readThemePreference(): ThemePreference {
+  const value = localStorage.getItem('scholar_theme');
+  return value === 'light' || value === 'dark' || value === 'system' ? value : 'system';
+}
+
+const documentControllers = new Map<string, AbortController>();
 
 const savedProfile = localStorage.getItem('scholar_profile');
 // Legacy persisted keys are treated as previously remembered.
@@ -156,6 +169,8 @@ export const useStore = create<Store>((set, get) => ({
     }
     set({ uploadError: null });
     const docId = uuidv4();
+    const controller = new AbortController();
+    documentControllers.set(docId, controller);
     const doc: UploadedDocument = {
       id: docId,
       name: file.name,
@@ -163,17 +178,30 @@ export const useStore = create<Store>((set, get) => ({
       size: file.size,
       uploadedAt: new Date(),
       chunkCount: 0,
-      status: 'processing',
+      status: 'validating',
+      processedUnits: 0,
+      ocrLanguage: get().settings.ocrLanguage,
+      usedOcr: false,
+      ocrUnits: [],
+      failedUnits: [],
+      sourceFile: file,
     };
 
     set(state => ({ documents: [...state.documents, doc] }));
 
     try {
-      const result = await extractFileText(file);
+      const result = await extractFileText(file, {
+        documentId: docId,
+        ocrLanguage: get().settings.ocrLanguage,
+        signal: controller.signal,
+        onProgress: progress => set(state => ({ documents: state.documents.map(d => d.id === docId ? { ...d, status: progress.stage, processedUnits: progress.completedUnits, totalUnits: progress.totalUnits } : d) })),
+      });
+      set(state => ({ documents: state.documents.map(d => d.id === docId ? { ...d, status: 'chunking' } : d) }));
       const textChunks = chunkText(result.text, 400, 80);
 
       updateVocabulary(textChunks);
 
+      set(state => ({ documents: state.documents.map(d => d.id === docId ? { ...d, status: 'indexing' } : d) }));
       const documentChunks: DocumentChunk[] = textChunks.map((content, idx) => ({
         id: uuidv4(),
         documentId: docId,
@@ -181,6 +209,8 @@ export const useStore = create<Store>((set, get) => ({
         content,
         embedding: generateEmbedding(content),
         chunkIndex: idx,
+        documentKind: result.documentKind,
+        pageNumber: Number(content.match(/^\[Page (\d+)\]/)?.[1]) || undefined,
       }));
 
       set(state => ({
@@ -189,14 +219,20 @@ export const useStore = create<Store>((set, get) => ({
           if (d.id !== docId) return d;
           // Partial extraction: some pages succeeded, some failed.
           // Mark as 'partial' so the UI shows a warning instead of an error.
-          const status = result.warning ? 'partial' : 'ready';
+          const status = result.partial ? 'partial' : 'ready';
           return {
             ...d,
             status,
             chunkCount: documentChunks.length,
-            extractionWarning: result.warning,
-            pagesExtracted: result.pagesExtracted,
-            totalPages: result.totalPages,
+            extractionWarning: result.warnings.join('. ') || undefined,
+            pagesExtracted: result.processedUnitCount,
+            totalPages: result.pageCount,
+            processedUnits: result.processedUnitCount,
+            totalUnits: result.pageCount ?? result.imageCount,
+            usedOcr: result.usedOcr,
+            ocrUnits: result.ocrUnits,
+            failedUnits: result.failedUnits,
+            retryable: result.partial,
           };
         }),
       }));
@@ -217,13 +253,27 @@ export const useStore = create<Store>((set, get) => ({
 
       set(state => ({
         documents: state.documents.map(d =>
-          d.id === docId ? { ...d, status: 'error', error: errorMsg } : d
+          d.id === docId ? { ...d, status: controller.signal.aborted ? 'cancelled' : 'error', error: errorMsg, retryable: true } : d
         ),
       }));
+    } finally {
+      documentControllers.delete(docId);
     }
   },
 
+  cancelDocument: (id) => documentControllers.get(id)?.abort(),
+
+  retryDocument: async (id) => {
+    const document = get().documents.find(item => item.id === id);
+    const file = document?.sourceFile;
+    if (!file) return;
+    get().removeDocument(id);
+    await get().uploadDocument(file);
+  },
+
   removeDocument: (id) => {
+    documentControllers.get(id)?.abort();
+    documentControllers.delete(id);
     set(state => ({
       documents: state.documents.filter(d => d.id !== id),
       chunks: state.chunks.filter(c => c.documentId !== id),
@@ -231,6 +281,8 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   clearDocuments: () => {
+    for (const controller of documentControllers.values()) controller.abort();
+    documentControllers.clear();
     resetEmbeddingState();
     set({ documents: [], chunks: [], suggestions: [], uploadError: null });
   },
@@ -269,6 +321,11 @@ export const useStore = create<Store>((set, get) => ({
   toggleRubric: () => set(state => ({
     settings: { ...state.settings, rubricEnabled: !state.settings.rubricEnabled },
   })),
+  setTheme: (theme) => {
+    localStorage.setItem('scholar_theme', theme);
+    set(state => ({ settings: { ...state.settings, theme } }));
+  },
+  setOcrLanguage: (ocrLanguage) => set(state => ({ settings: { ...state.settings, ocrLanguage } })),
 
   setProfile: (p) => {
     set(state => {
@@ -299,6 +356,8 @@ export const useStore = create<Store>((set, get) => ({
 
   /** Resets the entire session — clears messages, documents, and embeddings. */
   newChat: () => {
+    for (const controller of documentControllers.values()) controller.abort();
+    documentControllers.clear();
     resetEmbeddingState();
     set({ messages: [], documents: [], chunks: [], isLoading: false, suggestions: [] });
   },

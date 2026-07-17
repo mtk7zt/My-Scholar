@@ -14,6 +14,11 @@ describe('document limits', () => {
       maxZipEntries: 200,
       maxZipExpandedBytes: 100 * 1024 * 1024,
       pdfPageConcurrency: 4,
+      maxOcrPages: 50,
+      maxOcrPixels: 16_000_000,
+      maxOcrDimension: 3000,
+      ocrPageTimeoutMs: 45_000,
+      ocrDocumentTimeoutMs: 10 * 60_000,
     });
   });
 

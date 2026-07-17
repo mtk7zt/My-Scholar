@@ -14,6 +14,7 @@ import { useStore } from '../store/useStore';
 import { streamGeminiResponse } from '../lib/gemini';
 import type { GeminiMessage } from '../lib/gemini';
 import { ensureDocumentSharingConsent } from '../lib/privacy';
+import { DocumentStatusList } from './DocumentStatusList';
 
 export const ChatInput: React.FC = () => {
   const [input, setInput] = useState('');
@@ -113,9 +114,8 @@ export const ChatInput: React.FC = () => {
 
   const handleFileUpload = async (files: FileList | null) => {
     if (!files) return;
-    for (const file of Array.from(files)) {
-      await uploadDocument(file);
-    }
+    try { for (const file of Array.from(files)) await uploadDocument(file); }
+    finally { if (fileInputRef.current) fileInputRef.current.value = ''; }
   };
 
   const handleDrop = async (e: React.DragEvent) => {
@@ -146,6 +146,7 @@ export const ChatInput: React.FC = () => {
         </div>
       )}
 
+      <div className="mb-2 sm:hidden"><DocumentStatusList compact /></div>
       {/* Document indicator */}
       {uploadError && (
         <div role='alert' className='mb-2 flex items-start justify-between gap-2 rounded-lg border border-red-800/50 bg-red-900/20 px-3 py-2 text-xs text-red-300'>
@@ -179,7 +180,7 @@ export const ChatInput: React.FC = () => {
           type="file"
           multiple
           className="hidden"
-          accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.txt,.md,.zip,.js,.ts,.jsx,.tsx,.py,.java,.c,.cpp,.h,.cs,.go,.rs,.rb,.php,.html,.css,.json,.xml,.yaml,.yml,.sh,.sql"
+          accept=".pdf,.png,.jpg,.jpeg,.webp,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.txt,.md,.zip,.js,.ts,.jsx,.tsx,.py,.java,.c,.cpp,.h,.cs,.go,.rs,.rb,.php,.html,.css,.json,.xml,.yaml,.yml,.sh,.sql"
           onChange={e => handleFileUpload(e.target.files)}
         />
 

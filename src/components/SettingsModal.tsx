@@ -33,7 +33,7 @@ export const SettingsModal: React.FC = () => {
     settingsOpen, setSettingsOpen,
     apiKey, apiKeyRemembered, setApiKey, forgetApiKey,
     profile, setProfile,
-    settings, setMode, setTone, toggleRubric, updateSettings,
+    settings, setMode, setTone, toggleRubric, updateSettings, setTheme, setOcrLanguage,
   } = useStore();
 
   const [showKey, setShowKey] = useState(false);
@@ -128,10 +128,26 @@ export const SettingsModal: React.FC = () => {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          <p className="text-right text-[10px] text-theme-muted" aria-label="Application build">Build {__BUILD_ID__.slice(0, 12)}</p>
 
           {/* PROFILE TAB */}
           {activeTab === 'profile' && (
             <div className="space-y-5">
+              <section aria-labelledby="appearance-heading" className="space-y-3">
+                <h3 id="appearance-heading" className="text-sm font-medium text-theme">Appearance</h3>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['light', 'dark', 'system'] as const).map(theme => (
+                    <button key={theme} onClick={() => setTheme(theme)} aria-pressed={settings.theme === theme} className={`touch-action rounded-xl border px-2 py-2 capitalize ${settings.theme === theme ? 'border-scholar-500 bg-scholar-600/30 text-theme' : 'border-theme text-theme-muted'}`}>{theme}</button>
+                  ))}
+                </div>
+              </section>
+              <section aria-labelledby="ocr-heading" className="space-y-2">
+                <label id="ocr-heading" htmlFor="ocr-language" className="text-sm font-medium text-theme">OCR language</label>
+                <select id="ocr-language" value={settings.ocrLanguage} onChange={event => setOcrLanguage(event.target.value as 'eng' | 'fra')} className="theme-control w-full rounded-xl px-3 py-2">
+                  <option value="eng">English</option><option value="fra">French</option>
+                </select>
+                <p className="text-xs text-theme-muted">Choose before uploading scanned documents or images.</p>
+              </section>
               {/* Avatar + Name */}
               <div className="flex flex-col items-center gap-3 py-4">
                 <button

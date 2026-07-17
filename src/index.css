@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -8,14 +6,33 @@
   box-sizing: border-box;
 }
 
+:root, :root[data-theme='dark'] {
+  color-scheme: dark;
+  --app-bg: #0f0f1a;
+  --surface: #171827;
+  --surface-soft: #1e293b;
+  --text: #f1f5f9;
+  --muted: #94a3b8;
+  --border: #334155;
+}
+:root[data-theme='light'] {
+  color-scheme: light;
+  --app-bg: #f8fafc;
+  --surface: #ffffff;
+  --surface-soft: #eef2ff;
+  --text: #172033;
+  --muted: #526179;
+  --border: #cbd5e1;
+}
+
 body {
-  font-family: 'Inter', sans-serif;
-  background: #0f0f1a;
-  color: #e2e8f0;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--app-bg);
+  color: var(--text);
   margin: 0;
   padding: 0;
   overflow: hidden;
-  height: 100vh;
+  height: 100dvh;
   /* Prevent iOS bounce scroll */
   overscroll-behavior: none;
 }
@@ -28,10 +45,39 @@ body {
 }
 
 #root {
-  height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
 }
+
+.app-shell { background: var(--app-bg); color: var(--text); padding-bottom: env(safe-area-inset-bottom); }
+.text-theme { color: var(--text); }
+.text-theme-muted { color: var(--muted); }
+.border-theme { border-color: var(--border); }
+.theme-control { color: var(--text); background: var(--surface); border: 1px solid var(--border); }
+.touch-action { min-width: 44px; min-height: 44px; padding: 0 .5rem; color: var(--muted); border-radius: .5rem; }
+.touch-action:hover, .touch-action:focus-visible { color: var(--text); background: var(--surface-soft); }
+.status-banner { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; padding: .5rem 1rem; background: #312e81; color: white; font-size: .75rem; }
+.status-banner button { min-height: 36px; text-decoration: underline; }
+progress { accent-color: #6366f1; height: .35rem; }
+
+:root[data-theme='light'] .glass { background: rgba(255,255,255,.82); border-color: rgba(100,116,139,.25); }
+:root[data-theme='light'] .text-white,
+:root[data-theme='light'] .text-slate-100,
+:root[data-theme='light'] .text-slate-200 { color: var(--text) !important; }
+:root[data-theme='light'] .text-slate-300,
+:root[data-theme='light'] .text-slate-400,
+:root[data-theme='light'] .text-slate-500,
+:root[data-theme='light'] .text-slate-600,
+:root[data-theme='light'] .text-slate-700 { color: var(--muted) !important; }
+:root[data-theme='light'] .bg-slate-800,
+:root[data-theme='light'] .bg-slate-800\/80,
+:root[data-theme='light'] .bg-slate-800\/50,
+:root[data-theme='light'] .bg-\[\#0f0f1a\] { background-color: var(--surface) !important; }
+:root[data-theme='light'] .border-slate-700,
+:root[data-theme='light'] .border-slate-800 { border-color: var(--border) !important; }
+:root[data-theme='light'] .prose { color: var(--text) !important; }
+:root[data-theme='light'] .prose h1, :root[data-theme='light'] .prose h2, :root[data-theme='light'] .prose h3, :root[data-theme='light'] .prose strong { color: var(--text) !important; }
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
@@ -139,12 +185,21 @@ body {
     overflow: hidden;
     position: fixed;
     width: 100%;
-    height: 100%;
+    height: 100dvh;
   }
   #root {
     height: 100%;
     overflow: hidden;
   }
+}
+
+@media (max-width: 430px) {
+  .document-status-row > div { flex-direction: column; }
+  .document-status-row > div > div:last-child { width: 100%; justify-content: flex-end; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 
 /* Prevent text selection on buttons for better mobile UX */

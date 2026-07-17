@@ -7,23 +7,26 @@ import { VitePWA } from 'vite-plugin-pwa'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig({
+  define: {
+    __BUILD_ID__: JSON.stringify(process.env.COMMIT_REF || process.env.VITE_BUILD_ID || 'local-development'),
+  },
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
-      injectRegister: 'auto',
-      includeAssets: ['favicon.svg'],
+      registerType: 'prompt',
+      injectRegister: null,
+      includeAssets: ['favicon.svg', 'icon-192.png', 'icon-512.png', 'theme-init.js'],
       workbox: {
         // Precache only versioned application-shell assets produced by Vite.
         // Gemini requests, uploaded documents, and user data are never cached.
         globPatterns: ['**/*.{html,js,css,mjs,svg,png,ico,woff2}'],
-        globIgnores: ['icon-*.png', 'favicon.svg', 'tesseract/**', 'tessdata/**'],
+        globIgnores: ['tesseract/**', 'tessdata/**', '**/*.map'],
         navigateFallback: '/index.html',
         navigateFallbackDenylist: [/^\/api(?:\/|$)/],
         runtimeCaching: [],
         cleanupOutdatedCaches: true,
-        clientsClaim: true,
-        skipWaiting: true,
+        clientsClaim: false,
+        skipWaiting: false,
       },
       devOptions: {
         enabled: false,
@@ -32,6 +35,9 @@ export default defineConfig({
         name: 'My Scholar',
         short_name: 'My Scholar',
         description: 'AI-powered learning and research assistant',
+        id: '/',
+        start_url: '/',
+        scope: '/',
         theme_color: '#0f172a',
         background_color: '#ffffff',
         display: 'standalone',
@@ -68,11 +74,6 @@ export default defineConfig({
         find: /^zustand\/(.+)$/,
         replacement: resolve(__dirname, 'node_modules/zustand/$1.js'),
       },
-      // Force xlsx to use its CJS build
-      {
-        find: /^xlsx$/,
-        replacement: resolve(__dirname, 'node_modules/xlsx/xlsx.js'),
-      },
     ],
   },
   optimizeDeps: {
@@ -98,7 +99,7 @@ export default defineConfig({
           if (id.includes('pdfjs-dist')) {
             return 'pdf';
           }
-          if (id.includes('mammoth') || id.includes('xlsx') || id.includes('jszip')) {
+          if (id.includes('mammoth') || id.includes('exceljs') || id.includes('jszip')) {
             return 'office';
           }
         },

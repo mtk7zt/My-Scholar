@@ -40,9 +40,9 @@ export const Sidebar: React.FC = () => {
 
   const handleFileUpload = async (files: FileList | null) => {
     if (!files) return;
-    for (const file of Array.from(files)) {
-      await uploadDocument(file);
-    }
+    if (window.innerWidth < 640) setSidebarOpen(false);
+    try { for (const file of Array.from(files)) await uploadDocument(file); }
+    finally { if (fileInputRef.current) fileInputRef.current.value = ''; }
   };
 
   if (!sidebarOpen) return null;
@@ -132,14 +132,14 @@ export const Sidebar: React.FC = () => {
               >
                 <div className="text-2xl mb-1 group-hover:scale-110 transition-transform">📂</div>
                 <p className="text-xs text-slate-400 group-hover:text-slate-300">Click or drag files here</p>
-                <p className="text-xs text-slate-600 mt-1">PDF, DOCX, PPTX, XLSX, TXT, ZIP, Code</p>
+                <p className="text-xs text-slate-600 mt-1">PDF, PNG, JPEG, WebP, Office, TXT, ZIP, Code</p>
               </button>
               <input
                 ref={fileInputRef}
                 type="file"
                 multiple
                 className="hidden"
-                accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.txt,.md,.zip,.js,.ts,.jsx,.tsx,.py,.java,.c,.cpp,.h,.cs,.go,.rs,.rb,.php,.html,.css,.json,.xml,.yaml,.yml,.sh,.sql"
+                accept=".pdf,.png,.jpg,.jpeg,.webp,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.txt,.md,.zip,.js,.ts,.jsx,.tsx,.py,.java,.c,.cpp,.h,.cs,.go,.rs,.rb,.php,.html,.css,.json,.xml,.yaml,.yml,.sh,.sql"
                 onChange={e => handleFileUpload(e.target.files)}
               />
 
@@ -172,7 +172,7 @@ export const Sidebar: React.FC = () => {
                         <div className="flex-1 min-w-0">
                           <p className="text-xs font-medium text-white truncate">{doc.name}</p>
                           <p className="text-xs text-slate-500">{formatFileSize(doc.size)}</p>
-                          {doc.status === 'processing' && (
+                          {!['ready', 'partial', 'error', 'cancelled'].includes(doc.status) && (
                             <div className="flex items-center gap-1 mt-1">
                               <div className="w-3 h-3 border border-scholar-500 border-t-transparent rounded-full animate-spin" />
                               <span className="text-xs text-scholar-400">Processing...</span>

@@ -34,3 +34,12 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify PWA privacy and manifest
+        run: npm run verify:pwa
+
+      - name: Scan committed secrets
+        uses: gitleaks/gitleaks-action@v2
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
